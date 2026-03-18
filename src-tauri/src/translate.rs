@@ -82,33 +82,160 @@ fn sanitize_precompiled_normalizers(value: &mut serde_json::Value) {
     }
 }
 
+fn is_invalid_precompiled_normalizer(
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    map.get("type")
+        .and_then(|value| value.as_str())
+        .map(|kind| kind == "Precompiled")
+        .unwrap_or(false)
+        && map
+            .get("precompiled_charsmap")
+            .map(|value| value.is_null() || value.as_str() == Some(""))
+            .unwrap_or(true)
+}
+
+fn strip_invalid_precompiled_normalizer_nodes(
+    value: &mut serde_json::Value,
+    stripped_any: &mut bool,
+) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            if is_invalid_precompiled_normalizer(map) {
+                *stripped_any = true;
+                return true;
+            }
+
+            for child in map.values_mut() {
+                if strip_invalid_precompiled_normalizer_nodes(child, stripped_any) {
+                    *child = serde_json::Value::Null;
+                }
+            }
+
+            false
+        }
+        serde_json::Value::Array(items) => {
+            let mut retained = Vec::with_capacity(items.len());
+            for mut item in std::mem::take(items) {
+                if !strip_invalid_precompiled_normalizer_nodes(&mut item, stripped_any) {
+                    retained.push(item);
+                }
+            }
+            *items = retained;
+            false
+        }
+        _ => false,
+    }
+}
+
+fn strip_invalid_precompiled_normalizers(value: &mut serde_json::Value) -> bool {
+    let mut stripped_any = false;
+    let _ = strip_invalid_precompiled_normalizer_nodes(value, &mut stripped_any);
+    stripped_any
+}
+
+fn load_tokenizer_from_bytes(bytes: &[u8], label: &str) -> Result<Tokenizer, String> {
+    match catch_unwind(AssertUnwindSafe(|| Tokenizer::from_bytes(bytes))) {
+        Ok(Ok(tokenizer)) => Ok(tokenizer),
+        Ok(Err(error)) => Err(format!("Failed to load {label}: {error}")),
+        Err(payload) => {
+            let panic_msg = panic_payload_to_string(payload);
+            Err(format!("{label} panicked during load: {panic_msg}"))
+        }
+    }
+}
+
 fn load_tokenizer(tokenizer_path: &Path) -> Result<Tokenizer, String> {
-    match Tokenizer::from_file(tokenizer_path) {
-        Ok(tokenizer) => Ok(tokenizer),
-        Err(primary_error) => {
+    match catch_unwind(AssertUnwindSafe(|| {
+        Tokenizer::from_file(tokenizer_path)
+    })) {
+        Ok(Ok(tokenizer)) => return Ok(tokenizer),
+        Ok(Err(primary_error)) => {
             let primary_msg = primary_error.to_string();
             if !primary_msg.contains("Precompiled") || !primary_msg.contains("expected a borrowed string") {
                 return Err(format!("Failed to load tokenizer: {primary_error}"));
             }
+        }
+        Err(payload) => {
+            let panic_msg = panic_payload_to_string(payload);
+            log::warn!("Tokenizer::from_file panicked; attempting sanitizer fallback: {panic_msg}");
+        }
+    }
+
+    log::warn!(
+        "Tokenizer deserialize failed with known Precompiled null-field issue, applying compatibility sanitizer"
+    );
+
+    let raw = fs::read_to_string(tokenizer_path)
+        .map_err(|e| format!("Failed to read tokenizer for fallback: {e}"))?;
+
+    let mut json: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("Failed to parse tokenizer JSON for fallback: {e}"))?;
+
+    sanitize_precompiled_normalizers(&mut json);
+
+    let normalized = serde_json::to_vec(&json)
+        .map_err(|e| format!("Failed to serialize fallback tokenizer JSON: {e}"))?;
+
+    match load_tokenizer_from_bytes(&normalized, "sanitized tokenizer fallback") {
+        Ok(tokenizer) => Ok(tokenizer),
+        Err(sanitized_error) => {
+            if !strip_invalid_precompiled_normalizers(&mut json) {
+                return Err(sanitized_error);
+            }
 
             log::warn!(
-                "Tokenizer deserialize failed with known Precompiled null-field issue, applying compatibility sanitizer"
+                "Sanitized tokenizer still failed; stripping invalid Precompiled normalizer nodes with missing charsmap"
             );
 
-            let raw = fs::read_to_string(tokenizer_path)
-                .map_err(|e| format!("Failed to read tokenizer for fallback: {e}"))?;
+            let stripped = serde_json::to_vec(&json)
+                .map_err(|e| format!("Failed to serialize stripped tokenizer JSON: {e}"))?;
 
-            let mut json: serde_json::Value = serde_json::from_str(&raw)
-                .map_err(|e| format!("Failed to parse tokenizer JSON for fallback: {e}"))?;
-
-            sanitize_precompiled_normalizers(&mut json);
-
-            let normalized = serde_json::to_vec(&json)
-                .map_err(|e| format!("Failed to serialize fallback tokenizer JSON: {e}"))?;
-
-            Tokenizer::from_bytes(&normalized)
-                .map_err(|e| format!("Failed to load sanitized tokenizer fallback: {e}"))
+            load_tokenizer_from_bytes(&stripped, "stripped tokenizer fallback").map_err(
+                |stripped_error| format!("{sanitized_error}; {stripped_error}"),
+            )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn sanitize_precompiled_normalizers_replaces_null_fields() {
+        let mut value = json!({
+            "normalizer": {
+                "type": "Precompiled",
+                "precompiled_charsmap": null,
+                "precompiled": null
+            }
+        });
+
+        sanitize_precompiled_normalizers(&mut value);
+
+        assert_eq!(value["normalizer"]["precompiled_charsmap"], json!(""));
+        assert_eq!(value["normalizer"]["precompiled"], json!(""));
+    }
+
+    #[test]
+    fn strip_invalid_precompiled_normalizers_drops_null_precompiled_nodes() {
+        let mut value = json!({
+            "normalizer": {
+                "type": "Sequence",
+                "normalizers": [
+                    { "type": "NFC" },
+                    { "type": "Precompiled", "precompiled_charsmap": null }
+                ]
+            }
+        });
+
+        assert!(strip_invalid_precompiled_normalizers(&mut value));
+        assert_eq!(
+            value["normalizer"]["normalizers"],
+            json!([{ "type": "NFC" }])
+        );
     }
 }
 

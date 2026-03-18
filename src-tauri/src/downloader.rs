@@ -3,7 +3,7 @@ use reqwest::Client;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 
 #[derive(Clone, serde::Serialize)]
 struct DownloadProgress {
@@ -85,10 +85,7 @@ pub async fn download_file(
 
 #[tauri::command]
 pub async fn download_models(app: AppHandle, language_pair: String) -> Result<String, String> {
-    let local_data_dir = app.path().app_local_data_dir()
-        .map_err(|e| format!("Could not determine local data directory: {}", e))?;
-    
-    let model_dir = local_data_dir.join("models").join(&language_pair);
+    let model_dir = crate::models_root_dir(&app)?.join(&language_pair);
     
     if !model_dir.exists() {
         std::fs::create_dir_all(&model_dir)
@@ -142,10 +139,7 @@ pub async fn download_models(app: AppHandle, language_pair: String) -> Result<St
 
 #[tauri::command]
 pub fn check_models(app: AppHandle, language_pair: String) -> Result<bool, String> {
-    let local_data_dir = app.path().app_local_data_dir()
-        .map_err(|e| format!("Could not determine local data directory: {}", e))?;
-    
-    let model_dir = local_data_dir.join("models").join(&language_pair);
+    let model_dir = crate::models_root_dir(&app)?.join(&language_pair);
     
     let has_tokenizer = model_dir.join("tokenizer.json").exists();
     let has_encoder = model_dir.join("encoder_model.onnx").exists();

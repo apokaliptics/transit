@@ -149,6 +149,7 @@
       console.error("Failed to install model:", e);
       alert("Failed to " + (force ? "reinstall" : "install") + " model: " + e);
     } finally {
+      await refreshModelStatus();
       isDownloading = false;
       downloadSpeedBytesPerSec = 0;
       lastSpeedSampleMs = null;

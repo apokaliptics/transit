@@ -6,6 +6,7 @@ mod translate;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Size, WebviewWindow};
 use tokio::sync::Mutex;
@@ -272,10 +273,7 @@ async fn unlock_capture(
 /// Initialize the translation engine from the local data directory.
 #[tauri::command]
 fn init_engine(app: AppHandle, language_pair: String) -> Result<String, String> {
-    let local_data_dir = app.path().app_local_data_dir()
-        .map_err(|e| format!("Could not determine local data directory: {}", e))?;
-    
-    let model_dir = local_data_dir.join("models").join(&language_pair);
+    let model_dir = models_root_dir(&app)?.join(&language_pair);
 
     if model_dir.exists() {
         safe_init_engine(&model_dir)?;
@@ -324,6 +322,14 @@ pub fn run() {
 fn overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     app.get_webview_window("overlay")
         .ok_or_else(|| "Overlay window not found".to_string())
+}
+
+pub(crate) fn models_root_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    // Store models next to bundled resources so they live on the install disk chosen by the user.
+    let resource_dir = app.path().resource_dir()
+        .map_err(|e| format!("Could not determine resources directory: {e}"))?;
+
+    Ok(resource_dir.join("models"))
 }
 
 fn safe_init_engine(model_dir: &std::path::Path) -> Result<(), String> {
