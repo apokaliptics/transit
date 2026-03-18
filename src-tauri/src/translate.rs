@@ -1,5 +1,6 @@
 use ort::session::Session;
 use ort::value::Value;
+use std::fs;
 use std::path::Path;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -42,6 +43,71 @@ fn commit_session(path: &Path, label: &str) -> Result<Session, String> {
         Err(payload) => {
             let panic_msg = panic_payload_to_string(payload);
             Err(format!("{label} panicked during load: {panic_msg}"))
+        }
+    }
+}
+
+fn sanitize_precompiled_normalizers(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let is_precompiled = map
+                .get("type")
+                .and_then(|v| v.as_str())
+                .map(|t| t == "Precompiled")
+                .unwrap_or(false);
+
+            if is_precompiled {
+                if let Some(field) = map.get_mut("precompiled_charsmap") {
+                    if field.is_null() {
+                        *field = serde_json::Value::String(String::new());
+                    }
+                }
+                if let Some(field) = map.get_mut("precompiled") {
+                    if field.is_null() {
+                        *field = serde_json::Value::String(String::new());
+                    }
+                }
+            }
+
+            for child in map.values_mut() {
+                sanitize_precompiled_normalizers(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                sanitize_precompiled_normalizers(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn load_tokenizer(tokenizer_path: &Path) -> Result<Tokenizer, String> {
+    match Tokenizer::from_file(tokenizer_path) {
+        Ok(tokenizer) => Ok(tokenizer),
+        Err(primary_error) => {
+            let primary_msg = primary_error.to_string();
+            if !primary_msg.contains("Precompiled") || !primary_msg.contains("expected a borrowed string") {
+                return Err(format!("Failed to load tokenizer: {primary_error}"));
+            }
+
+            log::warn!(
+                "Tokenizer deserialize failed with known Precompiled null-field issue, applying compatibility sanitizer"
+            );
+
+            let raw = fs::read_to_string(tokenizer_path)
+                .map_err(|e| format!("Failed to read tokenizer for fallback: {e}"))?;
+
+            let mut json: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|e| format!("Failed to parse tokenizer JSON for fallback: {e}"))?;
+
+            sanitize_precompiled_normalizers(&mut json);
+
+            let normalized = serde_json::to_vec(&json)
+                .map_err(|e| format!("Failed to serialize fallback tokenizer JSON: {e}"))?;
+
+            Tokenizer::from_bytes(&normalized)
+                .map_err(|e| format!("Failed to load sanitized tokenizer fallback: {e}"))
         }
     }
 }
@@ -93,8 +159,7 @@ pub fn init(model_dir: &Path) -> Result<(), String> {
         commit_session(&merged_decoder_path, "decoder_model_merged.onnx")?
     };
 
-    let tokenizer = Tokenizer::from_file(&tokenizer_path)
-        .map_err(|e| format!("Failed to load tokenizer: {e}"))?;
+    let tokenizer = load_tokenizer(&tokenizer_path)?;
 
     let engine = Arc::new(TranslationEngine {
         encoder: Mutex::new(encoder),
