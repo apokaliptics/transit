@@ -1,27 +1,1360 @@
-﻿cargo :     Blocking 
-waiting for file lock 
-on build directory
-At line:1 char:1
-+ cargo check 2>&1 | 
-Out-File -FilePath d:\o
-nscreen-translator\buil
-d_ou ...
-+ ~~~~~~~~~~~~~~~~
+﻿cargo :    Compiling 
+proc-macro2 v1.0.106
+At line:1 char:14
++ cargo clean; cargo 
+build 2>&1 | Out-File 
+-FilePath 
+d:\onscreen-transl ...
++              
+~~~~~~~~~~~~~~~~
     + CategoryInfo     
          : NotSpecifi  
-  ed: (    Blocking    
- wa...build directo    
-ry:String) [], Rem    
+  ed: (   Compiling    
+ proc-macro2 v1.0.1    
+06:String) [], Rem    
 oteException
     + FullyQualifiedEr 
    rorId : NativeComm  
   andError
  
-    Checking 
-onscreen-translator 
+   Compiling 
+unicode-ident v1.0.24
+   Compiling quote 
+v1.0.45
+   Compiling cfg-if 
+v1.0.4
+   Compiling 
+windows-link v0.2.1
+   Compiling smallvec 
+v1.15.1
+   Compiling memchr 
+v2.8.0
+   Compiling itoa 
+v1.0.17
+   Compiling 
+serde_core v1.0.228
+   Compiling zerocopy 
+v0.8.42
+   Compiling autocfg 
+v1.5.0
+   Compiling writeable 
+v0.6.2
+   Compiling litemap 
+v0.8.1
+   Compiling fnv v1.0.7
+   Compiling bytes 
+v1.11.1
+   Compiling 
+percent-encoding v2.3.2
+   Compiling 
+icu_normalizer_data 
+v2.1.1
+   Compiling 
+icu_properties_data 
+v2.1.2
+   Compiling 
+stable_deref_trait 
+v1.2.1
+   Compiling getrandom 
+v0.2.17
+   Compiling thiserror 
+v2.0.18
+   Compiling byteorder 
+v1.5.0
+   Compiling siphasher 
+v1.0.2
+   Compiling rand_core 
+v0.6.4
+   Compiling 
+parking_lot_core 
+v0.9.12
+   Compiling strsim 
+v0.11.1
+   Compiling 
+ident_case v1.0.1
+   Compiling 
+windows_x86_64_msvc 
+v0.52.6
+   Compiling serde 
+v1.0.228
+   Compiling 
+phf_shared v0.11.3
+   Compiling zmij 
+v1.0.21
+   Compiling 
+windows-sys v0.61.2
+   Compiling siphasher 
+v0.3.11
+   Compiling getrandom 
+v0.1.16
+   Compiling utf8_iter 
+v1.0.4
+   Compiling 
+regex-syntax v0.8.10
+   Compiling libc 
+v0.2.183
+   Compiling anyhow 
+v1.0.102
+   Compiling http 
+v1.4.0
+   Compiling 
+find-msvc-tools v0.1.9
+   Compiling 
+new_debug_unreachable 
+v1.0.6
+   Compiling shlex 
+v1.3.0
+   Compiling log 
+v0.4.29
+   Compiling winnow 
+v1.0.0
+   Compiling syn 
+v1.0.109
+   Compiling 
+windows-targets v0.52.6
+   Compiling typeid 
+v1.0.3
+   Compiling utf-8 
+v0.7.6
+   Compiling rand_core 
+v0.5.1
+   Compiling thiserror 
+v1.0.69
+   Compiling 
+toml_writer 
+v1.0.7+spec-1.1.0
+   Compiling 
+toml_parser 
+v1.0.10+spec-1.1.0
+   Compiling 
+crossbeam-utils v0.8.21
+   Compiling cc v1.2.57
+   Compiling 
+erased-serde v0.4.10
+   Compiling winnow 
+v0.7.15
+   Compiling rand_pcg 
+v0.2.1
+   Compiling 
+phf_shared v0.8.0
+   Compiling syn 
+v2.0.117
+   Compiling 
+unic-common v0.9.0
+   Compiling 
+proc-macro-hack 
+v0.5.20+deprecated
+   Compiling 
+unic-char-range v0.9.0
+   Compiling 
+unic-ucd-version v0.9.0
+   Compiling 
+phf_shared v0.10.0
+   Compiling hashbrown 
+v0.16.1
+   Compiling getrandom 
+v0.4.2
+   Compiling 
+unic-char-property 
+v0.9.0
+   Compiling 
+equivalent v1.0.2
+   Compiling 
+scopeguard v1.2.0
+   Compiling dunce 
+v1.0.5
+   Compiling 
+alloc-no-stdlib v2.0.4
+   Compiling 
+serde_json v1.0.149
+   Compiling lock_api 
+v0.4.14
+   Compiling 
+unic-ucd-ident v0.9.0
+   Compiling 
+alloc-stdlib v0.2.2
+   Compiling 
+precomputed-hash v0.1.1
+   Compiling mac v0.1.1
+   Compiling once_cell 
+v1.21.4
+   Compiling 
+brotli-decompressor 
+v5.0.0
+   Compiling 
+parking_lot v0.12.5
+   Compiling bitflags 
+v1.3.2
+   Compiling indexmap 
+v2.13.0
+   Compiling futf 
+v0.1.5
+   Compiling dtoa 
+v1.0.11
+   Compiling 
+version_check v0.9.5
+   Compiling indexmap 
+v1.9.3
+   Compiling 
+num-traits v0.2.19
+   Compiling tendril 
+v0.4.3
+   Compiling 
+dtoa-short v0.3.5
+   Compiling 
+aho-corasick v1.1.4
+   Compiling 
+serde_spanned v1.0.4
+   Compiling semver 
+v1.0.27
+   Compiling 
+toml_datetime 
+v0.7.5+spec-1.1.0
+   Compiling uuid 
+v1.22.0
+   Compiling 
+form_urlencoded v1.2.2
+   Compiling 
+convert_case v0.4.0
+   Compiling camino 
+v1.2.2
+   Compiling brotli 
+v8.0.2
+   Compiling toml 
+v0.9.12+spec-1.1.0
+   Compiling nodrop 
+v0.1.14
+   Compiling 
+windows-link v0.1.3
+   Compiling matches 
+v0.1.10
+   Compiling glob 
+v0.3.3
+   Compiling servo_arc 
+v0.2.0
+   Compiling phf v0.8.0
+   Compiling fxhash 
+v0.2.1
+   Compiling schemars 
+v0.8.22
+   Compiling hashbrown 
+v0.12.3
+   Compiling 
+pin-project-lite 
+v0.2.17
+   Compiling 
+simd-adler32 v0.3.8
+   Compiling cfb v0.7.3
+   Compiling dyn-clone 
+v1.0.20
+   Compiling 
+regex-automata v0.4.14
+   Compiling 
+windows-strings v0.4.2
+   Compiling 
+windows-result v0.3.4
+   Compiling 
+vswhom-sys v0.1.3
+   Compiling crc32fast 
+v1.5.0
+   Compiling adler2 
+v2.0.1
+   Compiling infer 
+v0.19.0
+   Compiling 
+serde-untagged v0.1.9
+   Compiling 
+miniz_oxide v0.8.9
+   Compiling 
+crossbeam-epoch v0.9.18
+   Compiling either 
+v1.15.0
+   Compiling 
+rayon-core v1.13.0
+   Compiling 
+option-ext v0.2.0
+   Compiling 
+crossbeam-deque v0.8.6
+   Compiling bitflags 
+v2.11.0
+   Compiling 
+windows-sys v0.59.0
+   Compiling 
+ppv-lite86 v0.2.21
+   Compiling typenum 
+v1.19.0
+   Compiling flate2 
+v1.1.9
+   Compiling 
+num-integer v0.1.46
+   Compiling 
+rand_chacha v0.3.1
+   Compiling 
+rand_chacha v0.2.2
+   Compiling 
+windows-threading 
+v0.1.0
+   Compiling 
+winapi-util v0.1.11
+   Compiling 
+rustc_version v0.4.1
+   Compiling rand 
+v0.8.5
+   Compiling rand 
+v0.7.3
+   Compiling same-file 
+v1.0.6
+   Compiling 
+generic-array v0.14.7
+   Compiling 
+tracing-core v0.1.36
+   Compiling 
+synstructure v0.13.2
+   Compiling 
+darling_core v0.23.0
+   Compiling 
+serde_derive_internals 
+v0.29.1
+   Compiling walkdir 
+v2.5.0
+   Compiling base64 
+v0.22.1
+   Compiling regex 
+v1.12.3
+   Compiling 
+phf_generator v0.11.3
+   Compiling 
+phf_generator v0.10.0
+   Compiling 
+string_cache_codegen 
+v0.5.4
+   Compiling 
+phf_codegen v0.11.3
+   Compiling 
+phf_generator v0.8.0
+   Compiling vswhom 
+v0.1.0
+   Compiling 
+phf_codegen v0.8.0
+   Compiling tracing 
+v0.1.44
+   Compiling dirs-sys 
+v0.5.0
+   Compiling fdeflate 
+v0.3.7
+   Compiling heck 
+v0.5.0
+   Compiling rayon 
+v1.11.0
+   Compiling selectors 
+v0.24.0
+   Compiling dirs 
+v6.0.0
+   Compiling winapi 
+v0.3.9
+   Compiling zeroize 
+v1.8.2
+   Compiling time-core 
+v0.1.8
+   Compiling mio v1.1.1
+   Compiling 
+markup5ever v0.14.1
+   Compiling socket2 
+v0.6.3
+   Compiling num-conv 
+v0.2.0
+   Compiling paste 
+v1.0.15
+   Compiling 
+raw-window-handle 
+v0.6.2
+   Compiling 
+unicode-segmentation 
+v1.12.0
+   Compiling powerfmt 
+v0.2.0
+   Compiling httparse 
+v1.10.1
+   Compiling deranged 
+v0.5.8
+   Compiling 
+time-macros v0.2.27
+   Compiling 
+num-bigint v0.4.6
+   Compiling cookie 
+v0.18.1
+   Compiling cssparser 
+v0.29.6
+   Compiling 
+phf_macros v0.10.0
+   Compiling base64ct 
+v1.8.3
+   Compiling 
+native-tls v0.2.18
+   Compiling 
+zerofrom-derive v0.1.6
+   Compiling 
+yoke-derive v0.8.1
+   Compiling 
+serde_derive v1.0.228
+   Compiling 
+zerovec-derive v0.11.2
+   Compiling 
+displaydoc v0.2.5
+   Compiling 
+thiserror-impl v2.0.18
+   Compiling 
+phf_macros v0.11.3
+   Compiling 
+thiserror-impl v1.0.69
+   Compiling 
+windows-interface 
+v0.59.3
+   Compiling 
+windows-implement 
+v0.60.2
+   Compiling ctor 
+v0.2.9
+   Compiling 
+cssparser-macros v0.6.1
+   Compiling phf 
+v0.10.1
+   Compiling 
+match_token v0.1.0
+   Compiling 
+derive_more v0.99.20
+   Compiling phf 
+v0.11.3
+   Compiling 
+schemars_derive v0.8.22
+   Compiling 
+windows-core v0.61.2
+   Compiling winreg 
+v0.55.0
+   Compiling 
+zerocopy-derive v0.8.42
+   Compiling 
+tokio-macros v2.6.1
+   Compiling 
+darling_macro v0.23.0
+   Compiling 
+embed-resource v3.0.7
+   Compiling 
+equator-macro v0.4.2
+   Compiling 
+windows_x86_64_msvc 
+v0.53.1
+   Compiling arrayvec 
+v0.7.6
+   Compiling zerofrom 
+v0.1.6
+   Compiling 
+futures-core v0.3.32
+   Compiling 
+tauri-winres v0.3.5
+   Compiling time 
+v0.3.47
+   Compiling yoke 
+v0.8.1
+   Compiling 
+num-rational v0.4.2
+   Compiling 
+windows-future v0.2.1
+   Compiling darling 
+v0.23.0
+   Compiling 
+windows-numerics v0.2.0
+   Compiling 
+windows-collections 
+v0.2.0
+   Compiling 
+pem-rfc7468 v0.7.0
+   Compiling zerovec 
+v0.11.5
+   Compiling zerotrie 
+v0.2.3
+   Compiling 
+webview2-com-sys 
+v0.38.2
+   Compiling 
+serde_with_macros 
+v3.18.0
+   Compiling equator 
+v0.4.2
+   Compiling windows 
+v0.61.3
+   Compiling tokio 
+v1.50.0
+   Compiling 
+webview2-com-macros 
+v0.8.1
+   Compiling 
+aligned-vec v0.6.4
+   Compiling 
+crypto-common v0.1.7
+   Compiling 
+block-buffer v0.10.4
+   Compiling tinystr 
+v0.8.2
+   Compiling 
+potential_utf v0.1.4
+   Compiling v_frame 
+v0.3.9
+   Compiling 
+rustls-pki-types 
+v1.14.0
+   Compiling 
+icu_collections v2.1.1
+   Compiling 
+icu_locale_core v2.1.1
+   Compiling 
+darling_core v0.20.11
+   Compiling schannel 
+v0.1.29
+   Compiling as-slice 
+v0.2.1
+   Compiling 
+windows-result v0.4.1
+   Compiling 
+windows-strings v0.5.1
+   Compiling 
+serde_with v3.18.0
+   Compiling 
+windows-version v0.1.7
+   Compiling built 
+v0.8.0
+   Compiling 
+windows_x86_64_msvc 
+v0.48.5
+   Compiling 
+av-scenechange v0.14.1
+   Compiling 
+windows-core v0.62.2
+   Compiling 
+icu_provider v2.1.1
+   Compiling 
+icu_properties v2.1.2
+   Compiling 
+icu_normalizer v2.1.1
+   Compiling rav1e 
+v0.8.1
+   Compiling aligned 
+v0.4.3
+   Compiling 
+string_cache v0.8.9
+   Compiling jsonptr 
+v0.6.3
+   Compiling 
+cargo-platform v0.1.9
+   Compiling 
+cargo_toml v0.22.3
+   Compiling dpi v0.1.2
+   Compiling socks 
+v0.3.4
+   Compiling 
+json-patch v3.0.1
+   Compiling 
+cargo_metadata v0.19.2
+   Compiling 
+idna_adapter v1.2.1
+   Compiling idna 
+v1.1.0
+   Compiling html5ever 
+v0.29.1
+   Compiling 
+webpki-root-certs 
+v1.0.6
+   Compiling digest 
+v0.10.7
+   Compiling 
+ureq-proto v0.5.3
+   Compiling der 
+v0.7.10
+   Compiling url v2.5.8
+   Compiling 
+profiling-procmacros 
+v1.0.17
+   Compiling 
+futures-macro v0.3.32
+   Compiling 
+arg_enum_proc_macro 
+v0.3.4
+   Compiling png 
+v0.17.16
+   Compiling 
+crossbeam-channel 
+v0.5.15
+   Compiling 
+darling_macro v0.20.11
+   Compiling http 
+v0.2.12
+   Compiling nom v8.0.0
+   Compiling kuchikiki 
+v0.8.8-speedreader
+   Compiling 
+urlpattern v0.3.0
+   Compiling core2 
+v0.4.0
+   Compiling pastey 
+v0.1.1
+   Compiling slab 
+v0.4.12
+   Compiling 
+pkg-config v0.3.32
+   Compiling y4m v0.8.0
+   Compiling 
+futures-sink v0.3.32
+   Compiling 
+cpufeatures v0.2.17
+   Compiling 
+quick-error v2.0.1
+   Compiling 
+futures-task v0.3.32
+   Compiling 
+tauri-runtime v2.10.1
+   Compiling wry 
+v0.54.4
+   Compiling sha2 
+v0.10.9
+   Compiling 
+tokio-util v0.7.18
+   Compiling 
+futures-util v0.3.32
+   Compiling half 
+v2.7.1
+   Compiling 
+tauri-utils v2.8.3
+   Compiling 
+bitstream-io v4.9.0
+   Compiling ureq 
+v3.2.0
+   Compiling onig_sys 
+v69.9.1
+   Compiling ico v0.5.0
+   Compiling darling 
+v0.20.11
+   Compiling profiling 
+v1.0.17
+   Compiling 
+windows-targets v0.53.5
+   Compiling 
+maybe-rayon v0.1.1
+   Compiling 
+fax_derive v0.2.0
+   Compiling 
+num-derive v0.4.2
+   Compiling itertools 
+v0.14.0
+   Compiling 
+simd_helpers v0.1.0
+   Compiling 
+windows-sys v0.52.0
+   Compiling 
+matrixmultiply v0.3.10
+   Compiling zune-core 
+v0.5.1
+   Compiling 
+lzma-rust2 v0.15.7
+   Compiling 
+noop_proc_macro v0.3.0
+   Compiling 
+tauri-runtime-wry 
+v2.10.1
+   Compiling weezl 
+v0.1.12
+   Compiling try-lock 
+v0.2.5
+   Compiling getrandom 
+v0.3.4
+   Compiling 
+hmac-sha256 v1.1.14
+   Compiling 
+portable-atomic v1.13.1
+   Compiling imgref 
+v1.12.0
+   Compiling loop9 
+v0.1.5
+   Compiling want 
+v0.3.1
+   Compiling fax v0.2.6
+   Compiling zune-jpeg 
+v0.5.13
+   Compiling 
+windows-targets v0.48.5
+   Compiling 
+derive_builder_core 
+v0.20.2
+   Compiling 
+windows-sys v0.60.2
+   Compiling av1-grain 
+v0.2.5
+   Compiling http-body 
+v0.4.6
+   Compiling h2 v0.3.27
+   Compiling socket2 
+v0.5.10
+   Compiling 
+keyboard-types v0.7.0
+   Compiling 
+avif-serialize v0.8.8
+   Compiling 
+futures-channel v0.3.32
+   Compiling serialize-
+to-javascript-impl 
+v0.1.2
+   Compiling 
+softbuffer v0.4.8
+   Compiling 
+zune-inflate v0.2.54
+   Compiling esaxx-rs 
+v0.1.10
+   Compiling 
+windows-result v0.2.0
+   Compiling 
+windows-threading 
+v0.2.1
+   Compiling 
+tower-service v0.3.3
+   Compiling ort-sys 
+v2.0.0-rc.12
+   Compiling utf8parse 
+v0.2.2
+   Compiling 
+byteorder-lite v0.1.0
+   Compiling pxfm 
+v0.1.28
+   Compiling httpdate 
+v1.0.3
+   Compiling mime 
+v0.3.17
+   Compiling 
+once_cell_polyfill 
+v1.70.2
+   Compiling bit_field 
+v0.10.3
+   Compiling bytemuck 
+v1.25.0
+   Compiling 
+rawpointer v0.2.1
+   Compiling 
+unicode-width v0.2.2
+   Compiling lebe 
+v0.5.3
+   Compiling anstyle 
+v1.0.14
+   Compiling 
+color_quant v1.1.0
+   Compiling rgb 
+v0.8.53
+   Compiling 
+encode_unicode v1.0.0
+   Compiling 
+minimal-lexical v0.2.1
+   Compiling 
+anstyle-wincon v3.0.11
+   Compiling exr 
+v1.74.0
+   Compiling gif 
+v0.14.1
+   Compiling qoi v0.4.1
+   Compiling nom v7.1.3
+   Compiling console 
+v0.15.11
+   Compiling 
+image-webp v0.2.4
+   Compiling 
+derive_builder_macro 
+v0.20.2
+   Compiling 
+anstyle-parse v0.2.7
+   Compiling 
+windows-future v0.3.2
+   Compiling serialize-
+to-javascript v0.1.2
+   Compiling 
+windows-strings v0.1.0
+   Compiling tiff 
+v0.11.3
+   Compiling 
+tokio-native-tls v0.3.1
+   Compiling 
+windows-sys v0.48.0
+   Compiling 
+window-vibrancy v0.6.0
+   Compiling hyper 
+v0.14.32
+   Compiling 
+windows-collections 
+v0.3.2
+   Compiling 
+windows-numerics v0.3.1
+   Compiling 
+windows-interface 
+v0.58.0
+   Compiling 
+windows-implement 
+v0.58.0
+   Compiling 
+serde_repr v0.1.20
+   Compiling 
+monostate-impl v0.1.18
+   Compiling png 
+v0.18.1
+   Compiling moxcms 
+v0.8.1
+   Compiling 
+anstyle-query v1.1.5
+   Compiling muda 
+v0.17.1
+   Compiling itertools 
+v0.11.0
+   Compiling 
+num-complex v0.4.6
+   Compiling 
+colorchoice v1.0.5
+   Compiling macro_rule
+s_attribute-proc_macro 
+v0.2.2
+   Compiling base64 
+v0.13.1
+   Compiling ryu 
+v1.0.23
+   Compiling 
+is_terminal_polyfill 
+v1.70.2
+   Compiling 
+number_prefix v0.4.0
+   Compiling base64 
+v0.21.7
+   Compiling anstream 
+v0.6.21
+   Compiling indicatif 
+v0.17.11
+   Compiling 
+spm_precompiled v0.1.4
+   Compiling 
+macro_rules_attribute 
+v0.2.2
+   Compiling 
+rustls-pemfile v1.0.4
+   Compiling 
+serde_urlencoded v0.7.1
+   Compiling ndarray 
+v0.17.2
+   Compiling 
+windows-core v0.58.0
+   Compiling monostate 
+v0.1.18
+   Compiling windows 
+v0.62.2
+   Compiling hyper-tls 
+v0.5.0
+   Compiling 
+rayon-cond v0.3.0
+   Compiling 
+derive_builder v0.20.2
+   Compiling 
+env_filter v1.0.0
+   Compiling itertools 
+v0.12.1
+   Compiling onig 
+v6.5.1
+   Compiling ravif 
+v0.13.0
+   Compiling open 
+v5.3.3
+   Compiling unicode-no
+rmalization-alignments 
+v0.1.12
+   Compiling 
+encoding_rs v0.8.35
+   Compiling 
+unicode_categories 
+v0.1.1
+   Compiling jiff 
+v0.2.23
+   Compiling 
+widestring v1.2.1
+   Compiling winreg 
+v0.50.0
+   Compiling 
+sync_wrapper v0.1.2
+   Compiling 
+lazy_static v1.5.0
+   Compiling 
+tauri-build v2.5.6
+   Compiling 
+tauri-plugin v2.5.4
+   Compiling 
+tauri-codegen v2.5.5
+   Compiling ipnet 
+v2.12.0
+   Compiling windows 
+v0.58.0
+   Compiling image 
+v0.25.10
+   Compiling 
+tokenizers v0.20.4
+   Compiling reqwest 
+v0.11.27
+   Compiling ort 
+v2.0.0-rc.12
+   Compiling 
+env_logger v0.11.9
+   Compiling tauri 
+v2.10.3
+   Compiling 
+tauri-plugin-opener 
+v2.5.3
+   Compiling 
+tauri-macros v2.5.5
+   Compiling transit 
 v0.1.0 (D:\onscreen-tra
 nslator\src-tauri)
-    Finished `dev` 
-profile [unoptimized + 
-debuginfo] target(s) 
-in 2.94s
+error: linking with 
+`link.exe` failed: 
+exit code: 1120
+  |
+  = note: "D:\\developm
+ent\\VC\\Tools\\MSVC\\1
+4.50.35717\\bin\\HostX6
+4\\x64\\link.exe" 
+"/NOLOGO" "C:\\Users\\A
+dmin\\AppData\\Local\\T
+emp\\rustcOfy6JM\\symbo
+ls.o" "<6 object files 
+omitted>" "D:\\onscreen
+-translator\\src-tauri\
+\target\\debug\\deps/{l
+ibtauri_build-add0ed073
+466f906,libdirs-0716729
+06d05db56,libdirs_sys-2
+bfd23b8ada3cfb1,libopti
+on_ext-93ca6f8facfda2bb
+,libtauri_winres-8ad6f6
+d1351a0a0b,libembed_res
+ource-8a2b0f710c57b8b1,
+librustc_version-f07f1a
+d5ce5702e1,libwinreg-03
+347b69683ab6ca,libwindo
+ws_sys-701e99d088039ee7
+,libwindows_targets-ac1
+568a7dbc0db44,libvswhom
+-d9a92c6c6ad7bd8b,libvs
+whom_sys-1ac011c13ea97c
+1a,liblibc-94e298b0a6c8
+f630,libcc-91896779fd66
+680e,libfind_msvc_tools
+-d217f1c3a0efd043,libsh
+lex-89da71dcc193fa7f,li
+btauri_utils-b92299efc2
+9a51e0,libinfer-68e1712
+cb9eafba4,libcfb-925e2d
+43ed745769,libfnv-5f092
+c695376cd15,libbrotli-0
+a2fe2f752953fcf,libbrot
+li_decompressor-f85ee7a
+62e62882e,liballoc_stdl
+ib-9c210cf49e646de3,lib
+alloc_no_stdlib-7f8628a
+66b77e0ee,liburlpattern
+-28e060af6af6ad01,libun
+ic_ucd_ident-fe605f4cd9
+203f8d,libunic_ucd_vers
+ion-ff8eedb04ec69336,li
+bunic_common-1514e9c5bd
+3ad31a,libunic_char_pro
+perty-36488ced019f342c,
+libunic_char_range-52a1
+d7f86f70e9df,libregex-2
+391870b684de697,librege
+x_automata-a20e6f4a0fa7
+ebb4,libaho_corasick-62
+37d35020b31937,libregex
+_syntax-20a60c06c71d7d7
+a,libcargo_metadata-92e
+783dc4444b057,libcargo_
+platform-90cf2b3353a1f3
+7d,libcamino-ae0168d261
+cf7293,libdunce-e796c80
+a965d1a86,libglob-35d05
+442eea4cd4e,libwalkdir-
+ea39b4c423f90d70,libsam
+e_file-31eebb222751e3ea
+,libwinapi_util-21560e4
+5c7d69ec3,libwindows_sy
+s-6764bc0b08636e3f,libk
+uchikiki-91b820bead88b2
+6f,libselectors-92a9323
+7e43c321f,libservo_arc-
+2a363f7ce687437c,libnod
+rop-74e565f81e1a0732,li
+bphf-0f74258bf3f4573d,l
+ibphf_shared-2d39678db2
+e8594e,libfxhash-229e7a
+9d1c30a8a3,libbyteorder
+-175ceb1f21954d71,libbi
+tflags-24bc63bf84e27a7c
+,libcssparser-b5c75c4fe
+62d0f30,libdtoa_short-d
+99b2a069a36a9a3,libdtoa
+-7b21391b4751f057,libma
+tches-47e3a4d233f96fb9,
+libphf-2ea4d649743f0eef
+,libphf_shared-0b561758
+e71fd1df,libsiphasher-4
+3d7b73cc7cd091d,libinde
+xmap-47af7a1e684ec36f,l
+ibequivalent-c7d9f0c1d6
+97975e,libhashbrown-ad8
+2f20268ea1d14,libhtml5e
+ver-2b9406e36babd430,li
+blog-1a970baf07ac404d,l
+ibmarkup5ever-b4c0c502f
+8933213,libstring_cache
+-99253bb85ae94e66,libpr
+ecomputed_hash-4a5d8c48
+35ab292e,libparking_lot
+-566acdf425f4ad16,libpa
+rking_lot_core-89ddf1f9
+4224b213,libwindows_lin
+k-10632afd942d55be,libl
+ock_api-e51058d3f368d4a
+b,libscopeguard-f633ece
+868697d7e,libtendril-d9
+7a32a2435fdf50,libutf8-
+538850a2d085bc9f,libfut
+f-2d94ba5f8c72f7cd,libd
+ebug_unreachable-42aca5
+467b0384db,libmac-91e23
+ce3cdd937f4,libjson_pat
+ch-b6bb8c6423b69318,lib
+thiserror-aa18ace88ea70
+f83,libjsonptr-622b2cea
+0a52adff,libserde_with-
+be472e1c540638c9,libhtt
+p-9023aa72d6eb6774,libb
+ytes-117a0c92606c80c6,l
+ibphf-c59eb866e07ff08b,
+libphf_shared-f61c0ebcf
+74c9855,libsiphasher-0e
+409daffe56b547,libquote
+-a9735b93f7f048b7,libpr
+oc_macro2-17cd741fb478b
+bcb,libunicode_ident-b1
+06511b9cdfda97}.rlib" "
+<sysroot>\\lib\\rustlib
+\\x86_64-pc-windows-msv
+c\\lib/{libproc_macro-*
+,librustc_literal_escap
+er-*,librustc_std_works
+pace_std-*}.rlib" "D:\\
+onscreen-translator\\sr
+c-tauri\\target\\debug\
+\deps/{libschemars-4a40
+21c05b39c446,libdyn_clo
+ne-ae27804f0c606a50,lib
+uuid-2a27847ca6de79e4,l
+ibgetrandom-ec4ab95be84
+75949,libcfg_if-0f4662f
+0845f58fe,libindexmap-d
+66328094b4c8f61,libhash
+brown-513afea14f34193a,
+libserde_json-4147c98fd
+2d2bcf7,libmemchr-63111
+8e918629c25,libitoa-f29
+496ff7d586191,libzmij-f
+e12805925d86e69,libserd
+e_untagged-cf47a54fd126
+b1cf,liberased_serde-22
+57785db5618d20,libtypei
+d-debadd6693463f50,libu
+rl-66357d0619e13069,lib
+idna-cb6fe3fe6479a0fb,l
+ibutf8_iter-02708bc5373
+f18e9,libidna_adapter-4
+1124cd2e76b91b9,libicu_
+properties-fc0dc3336f23
+cb75,libicu_properties_
+data-d9bb6ea5022e22de,l
+ibicu_normalizer-93b4a2
+d0c5699955,libsmallvec-
+c8abb1c30d8c8a56,libicu
+_normalizer_data-dbcd80
+d1941fa767,libicu_colle
+ctions-a4c26d5ca9d76bc8
+,libpotential_utf-6ca97
+08b19c65354,libicu_prov
+ider-23aabd7ddad715bd,l
+ibicu_locale_core-60a79
+c9db8a9d6da,libtinystr-
+e5e7acff89c8c46c,liblit
+emap-2e2c232a3d3747b5,l
+ibwriteable-3909bdb77c0
+bab31,libzerovec-b64660
+b78facf34c,libzerotrie-
+33b2d84634c01b6c,libyok
+e-cf04b795ff4e6b70,libs
+table_deref_trait-7a468
+5ef51544286,libzerofrom
+-3fe6a8a5440d4535,libfo
+rm_urlencoded-51f1a9f5f
+71c5d49,libpercent_enco
+ding-44b0c9cfb3d8d596,l
+ibthiserror-5340d398f70
+6bc05,libsemver-d25ba80
+e849cb31c,libcargo_toml
+-4ca6dbb793ec175b,libto
+ml-258c0303bee6c5ba,lib
+toml_writer-ad94502a25f
+52b4a,libwinnow-26407a0
+c53391ce4,libtoml_parse
+r-3f7db74d9491ba48,libw
+innow-abbc1577f5f28cbf,
+libserde_spanned-f40155
+8881729c40,libtoml_date
+time-798559fa632f3bc1,l
+ibserde-62534bf9cb62ed6
+0,libserde_core-1950b6a
+88f39c4d6,libanyhow-473
+6712a37916592}.rlib" "<
+sysroot>\\lib\\rustlib\
+\x86_64-pc-windows-msvc
+\\lib/{libstd-*,libpani
+c_unwind-*,libcfg_if-*,
+libwindows_targets-*,li
+brustc_demangle-*,libst
+d_detect-*,libhashbrown
+-*,librustc_std_workspa
+ce_alloc-*,libunwind-*,
+librustc_std_workspace_
+core-*,liballoc-*,libco
+re-*,libcompiler_builti
+ns-*}.rlib" "C:\\Users\
+\Admin\\.cargo\\registr
+y\\src\\index.crates.io
+-1949cf8c6b5b557f\\wind
+ows_x86_64_msvc-0.52.6\
+\lib\\windows.0.52.0.li
+b" "OleAut32.lib" 
+"Ole32.lib" "legacy_std
+io_definitions.lib" 
+"kernel32.lib" 
+"advapi32.lib" 
+"ole32.lib" 
+"oleaut32.lib" 
+"kernel32.lib" 
+"kernel32.lib" 
+"kernel32.lib" 
+"ntdll.lib" 
+"userenv.lib" 
+"ws2_32.lib" 
+"dbghelp.lib" 
+"/defaultlib:libcmt" 
+"/NXCOMPAT" "/LIBPATH:D
+:\\onscreen-translator\
+\src-tauri\\target\\deb
+ug\\build\\vswhom-sys-1
+8ee596f2768502a\\out" "
+/LIBPATH:D:\\developmen
+t\\VC\\Tools\\MSVC\\14.
+50.35717\\atlmfc\\lib\\
+x64" "/LIBPATH:C:\\User
+s\\Admin\\.cargo\\regis
+try\\src\\index.crates.
+io-1949cf8c6b5b557f\\wi
+ndows_x86_64_msvc-0.52.
+6\\lib" "/OUT:D:\\onscr
+een-translator\\src-tau
+ri\\target\\debug\\buil
+d\\transit-208e0a14218f
+e974\\build_script_buil
+d-208e0a14218fe974.exe"
+ "/OPT:REF,NOICF" 
+"/DEBUG" 
+"/PDBALTPATH:%_PDB%" "/
+NATVIS:<sysroot>\\lib\\
+rustlib\\etc\\intrinsic
+.natvis" "/NATVIS:<sysr
+oot>\\lib\\rustlib\\etc
+\\liballoc.natvis" "/NA
+TVIS:<sysroot>\\lib\\ru
+stlib\\etc\\libcore.nat
+vis" "/NATVIS:<sysroot>
+\\lib\\rustlib\\etc\\li
+bstd.natvis"
+  = note: some 
+arguments are omitted. 
+use `--verbose` to 
+show all linker 
+arguments
+  = note: LINK : 
+warning LNK4098: 
+defaultlib 'MSVCRT' 
+conflicts with use of 
+other libs; use /NODEFA
+ULTLIB:libraryΓÉì
+          LINK : 
+warning LNK4217: 
+symbol 'wcslen' 
+defined in 'libucrt.lib
+(strnlen.obj)' is 
+imported by 'libvswhom_
+sys-1ac011c13ea97c1a.rl
+ib(71b29add3157f200-vsw
+hom.o)' in function 
+'"wchar_t * __cdecl 
+concat(wchar_t const 
+*,wchar_t const 
+*,wchar_t const 
+*,wchar_t const *)" (?c
+oncat@@YAPEA_WPEB_W000@
+Z)'ΓÉì
+          LINK : 
+warning LNK4217: 
+symbol 'free' defined 
+in 'libucrt.lib(free.ob
+j)' is imported by 'lib
+vswhom_sys-1ac011c13ea9
+7c1a.rlib(71b29add3157f
+200-vswhom.o)' in 
+function 'vswhom_free_r
+esources'ΓÉì
+          LINK : 
+warning LNK4217: 
+symbol 'malloc' 
+defined in 'libucrt.lib
+(malloc.obj)' is 
+imported by 'libvswhom_
+sys-1ac011c13ea97c1a.rl
+ib(71b29add3157f200-vsw
+hom.o)' in function 
+'"wchar_t * __cdecl 
+concat(wchar_t const 
+*,wchar_t const 
+*,wchar_t const 
+*,wchar_t const *)" (?c
+oncat@@YAPEA_WPEB_W000@
+Z)'ΓÉì
+          LINK : 
+warning LNK4217: 
+symbol 'fclose' 
+defined in 'libucrt.lib
+(fclose.obj)' is 
+imported by 'libvswhom_
+sys-1ac011c13ea97c1a.rl
+ib(71b29add3157f200-vsw
+hom.o)' in function 
+'"public: __cdecl <lamb
+da_80e06afb12e99928c380
+2e4e279e32ce>::operator
+()(void)const " (??R<la
+mbda_80e06afb12e99928c3
+802e4e279e32ce>@@QEBA@X
+Z)'ΓÉì
+          LINK : 
+warning LNK4217: 
+symbol '_fileno' 
+defined in 'libucrt.lib
+(fileno.obj)' is 
+imported by 'libvswhom_
+sys-1ac011c13ea97c1a.rl
+ib(71b29add3157f200-vsw
+hom.o)' in function 
+'"void __cdecl find_vis
+ual_studio_by_fighting_
+through_microsoft_crazi
+ness(struct 
+Find_Result *)" (?find_
+visual_studio_by_fighti
+ng_through_microsoft_cr
+aziness@@YAXPEAUFind_Re
+sult@@@Z)'ΓÉì
+          LINK : 
+warning LNK4217: 
+symbol 
+'_get_osfhandle' 
+defined in 'libucrt.lib
+(osfinfo.obj)' is 
+imported by 'libvswhom_
+sys-1ac011c13ea97c1a.rl
+ib(71b29add3157f200-vsw
+hom.o)' in function 
+'"void __cdecl find_vis
+ual_studio_by_fighting_
+through_microsoft_crazi
+ness(struct 
+Find_Result *)" (?find_
+visual_studio_by_fighti
+ng_through_microsoft_cr
+aziness@@YAXPEAUFind_Re
+sult@@@Z)'ΓÉì
+          libvswhom_sys
+-1ac011c13ea97c1a.rlib(
+71b29add3157f200-vswhom
+.o) : error LNK2019: 
+unresolved external 
+symbol __imp__wcsdup 
+referenced in function 
+"void __cdecl 
+win10_best(wchar_t 
+*,wchar_t *,struct 
+Version_Data *)" (?win1
+0_best@@YAXPEA_W0PEAUVe
+rsion_Data@@@Z)ΓÉì
+          libvswhom_sys
+-1ac011c13ea97c1a.rlib(
+71b29add3157f200-vswhom
+.o) : error LNK2019: 
+unresolved external 
+symbol __imp_fgetws 
+referenced in function 
+"void __cdecl find_visu
+al_studio_by_fighting_t
+hrough_microsoft_crazin
+ess(struct Find_Result 
+*)" (?find_visual_studi
+o_by_fighting_through_m
+icrosoft_craziness@@YAX
+PEAUFind_Result@@@Z)ΓÉì
+          libvswhom_sys
+-1ac011c13ea97c1a.rlib(
+71b29add3157f200-vswhom
+.o) : error LNK2019: 
+unresolved external 
+symbol __imp__wfopen_s 
+referenced in function 
+"void __cdecl find_visu
+al_studio_by_fighting_t
+hrough_microsoft_crazin
+ess(struct Find_Result 
+*)" (?find_visual_studi
+o_by_fighting_through_m
+icrosoft_craziness@@YAX
+PEAUFind_Result@@@Z)ΓÉì
+          libvswhom_sys
+-1ac011c13ea97c1a.rlib(
+71b29add3157f200-vswhom
+.o) : error LNK2019: 
+unresolved external 
+symbol __imp___stdio_co
+mmon_vswscanf 
+referenced in function 
+_vswscanf_s_lΓÉì
+          D:\onscreen-t
+ranslator\src-tauri\tar
+get\debug\build\transit
+-208e0a14218fe974\build
+_script_build-208e0a142
+18fe974.exe : fatal 
+error LNK1120: 4 
+unresolved externalsΓÉì
+          
+
+error: could not 
+compile `transit` 
+(build script) due to 
+1 previous error
+warning: build failed, 
+waiting for other jobs 
+to finish...

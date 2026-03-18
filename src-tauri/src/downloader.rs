@@ -12,6 +12,14 @@ struct DownloadProgress {
     total: Option<u64>,
 }
 
+async fn resolve_content_length(client: &Client, url: &str) -> Option<u64> {
+    // Some hosts omit content-length on streaming GET responses; try HEAD first.
+    match client.head(url).send().await {
+        Ok(resp) if resp.status().is_success() => resp.content_length(),
+        _ => None,
+    }
+}
+
 pub async fn download_file(
     app: &AppHandle,
     client: &Client,
@@ -31,13 +39,16 @@ pub async fn download_file(
         return Err(format!("HTTP Error {}: {}", res.status(), url));
     }
 
-    let total_size = res.content_length();
+    let total_size = match res.content_length() {
+        Some(len) => Some(len),
+        None => resolve_content_length(client, url).await,
+    };
     let mut downloaded: u64 = 0;
     let mut stream = res.bytes_stream();
 
     let mut file = File::create(save_path).map_err(|e| format!("File creation failed: {e}"))?;
 
-    let emit_interval = 10; // Emit progress every ~10 chunks to not overwhelm IPC
+    let emit_interval = 2; // Keep UI responsive without flooding IPC.
     let mut chunk_count = 0;
 
     let _ = app.emit("download-progress", DownloadProgress {

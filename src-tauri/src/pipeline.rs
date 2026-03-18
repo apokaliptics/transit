@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::{Emitter, WebviewWindow};
 
 use crate::capture;
@@ -13,21 +13,46 @@ pub struct TranslationPayload {
     pub source_text: String,
 }
 
+/// Region locked by the user for focused capture.
+#[derive(Clone, Copy, Debug)]
+pub struct CaptureRegion {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// Runs the capture → OCR → translate → emit loop.
 ///
 /// The loop runs every ~400ms and only processes frames where the content changed.
 /// It stops when `running` is set to `false`.
-pub async fn run_pipeline(window: WebviewWindow, running: Arc<AtomicBool>) {
+pub async fn run_pipeline(
+    window: WebviewWindow,
+    running: Arc<AtomicBool>,
+    capture_region: Arc<Mutex<Option<CaptureRegion>>>,
+) {
     log::info!("Translation pipeline started");
 
     while running.load(Ordering::Relaxed) {
-        // Get window position and size
-        let (x, y, width, height) = match get_window_bounds(&window) {
-            Ok(bounds) => bounds,
+        let locked_region = match capture_region.lock() {
+            Ok(guard) => *guard,
             Err(e) => {
-                log::warn!("Failed to get window bounds: {e}");
-                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-                continue;
+                log::warn!("Capture region lock error: {e}");
+                None
+            }
+        };
+
+        // Use the selected snip region when available; otherwise fallback to window bounds.
+        let (x, y, width, height) = if let Some(region) = locked_region {
+            (region.x, region.y, region.width, region.height)
+        } else {
+            match get_window_bounds(&window) {
+                Ok(bounds) => bounds,
+                Err(e) => {
+                    log::warn!("Failed to get window bounds: {e}");
+                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                    continue;
+                }
             }
         };
 
@@ -41,17 +66,17 @@ pub async fn run_pipeline(window: WebviewWindow, running: Arc<AtomicBool>) {
             Ok(Ok(Some(img))) => img,
             Ok(Ok(None)) => {
                 // No change detected, skip
-                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(180)).await;
                 continue;
             }
             Ok(Err(e)) => {
                 log::warn!("Capture error: {e}");
-                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(180)).await;
                 continue;
             }
             Err(e) => {
                 log::warn!("Capture task join error: {e}");
-                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(180)).await;
                 continue;
             }
         };
@@ -66,17 +91,17 @@ pub async fn run_pipeline(window: WebviewWindow, running: Arc<AtomicBool>) {
             Ok(Ok(text)) if !text.trim().is_empty() => text,
             Ok(Ok(_)) => {
                 // Empty text, nothing to translate
-                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(180)).await;
                 continue;
             }
             Ok(Err(e)) => {
                 log::warn!("OCR error: {e}");
-                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(180)).await;
                 continue;
             }
             Err(e) => {
                 log::warn!("OCR task join error: {e}");
-                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(180)).await;
                 continue;
             }
         };
@@ -115,7 +140,7 @@ pub async fn run_pipeline(window: WebviewWindow, running: Arc<AtomicBool>) {
             log::warn!("Failed to emit translation event: {e}");
         }
 
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(180)).await;
     }
 
     log::info!("Translation pipeline stopped");

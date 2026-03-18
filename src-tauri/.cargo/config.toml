@@ -1,0 +1,4 @@
+[env]
+# Force all C/C++ dependencies to use dynamic CRT (/MD) to match ONNX Runtime
+CFLAGS = "/MD"
+CXXFLAGS = "/MD"

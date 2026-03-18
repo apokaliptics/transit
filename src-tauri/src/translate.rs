@@ -1,7 +1,7 @@
 use ort::session::Session;
 use ort::value::Value;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use tokenizers::Tokenizer;
 
 /// Holds the loaded translation model and tokenizer.
@@ -12,7 +12,11 @@ struct TranslationEngine {
     tokenizer: Tokenizer,
 }
 
-static ENGINE: OnceLock<Result<TranslationEngine, String>> = OnceLock::new();
+static ENGINE: OnceLock<RwLock<Option<Arc<TranslationEngine>>>> = OnceLock::new();
+
+fn engine_slot() -> &'static RwLock<Option<Arc<TranslationEngine>>> {
+    ENGINE.get_or_init(|| RwLock::new(None))
+}
 
 /// Initialize the translation engine by loading model files from the given directory.
 ///
@@ -21,68 +25,85 @@ static ENGINE: OnceLock<Result<TranslationEngine, String>> = OnceLock::new();
 /// - `decoder_model.onnx` (or `decoder_model_merged.onnx`)
 /// - `tokenizer.json`
 pub fn init(model_dir: &Path) -> Result<(), String> {
-    ENGINE.get_or_init(|| {
-        log::info!("Loading translation model from {:?}", model_dir);
+    log::info!("Loading translation model from {:?}", model_dir);
 
-        let encoder_path = model_dir.join("encoder_model.onnx");
-        let decoder_path = if model_dir.join("decoder_model_merged.onnx").exists() {
-            model_dir.join("decoder_model_merged.onnx")
-        } else {
-            model_dir.join("decoder_model.onnx")
-        };
-        let tokenizer_path = model_dir.join("tokenizer.json");
+    let encoder_path = model_dir.join("encoder_model.onnx");
+    let merged_decoder_path = model_dir.join("decoder_model_merged.onnx");
+    let plain_decoder_path = model_dir.join("decoder_model.onnx");
+    let tokenizer_path = model_dir.join("tokenizer.json");
 
-        if !encoder_path.exists() {
-            return Err(format!("Encoder model not found: {}", encoder_path.display()));
-        }
-        if !decoder_path.exists() {
-            return Err(format!("Decoder model not found: {}", decoder_path.display()));
-        }
-        if !tokenizer_path.exists() {
-            return Err(format!("Tokenizer not found: {}", tokenizer_path.display()));
-        }
+    if !encoder_path.exists() {
+        return Err(format!("Encoder model not found: {}", encoder_path.display()));
+    }
+    if !tokenizer_path.exists() {
+        return Err(format!("Tokenizer not found: {}", tokenizer_path.display()));
+    }
+    if !merged_decoder_path.exists() && !plain_decoder_path.exists() {
+        return Err("Decoder model not found (expected decoder_model_merged.onnx or decoder_model.onnx)".to_string());
+    }
 
-        let encoder = Session::builder()
+    let encoder = Session::builder()
+        .map_err(|e| format!("Session builder error: {e}"))?
+        .with_intra_threads(2)
+        .map_err(|e| format!("Thread config error: {e}"))?
+        .commit_from_file(&encoder_path)
+        .map_err(|e| format!("Failed to load encoder: {e}"))?;
+
+    let decoder_builder = || {
+        Session::builder()
             .map_err(|e| format!("Session builder error: {e}"))?
             .with_intra_threads(2)
-            .map_err(|e| format!("Thread config error: {e}"))?
-            .commit_from_file(&encoder_path)
-            .map_err(|e| format!("Failed to load encoder: {e}"))?;
+            .map_err(|e| format!("Thread config error: {e}"))
+    };
 
-        let decoder = Session::builder()
-            .map_err(|e| format!("Session builder error: {e}"))?
-            .with_intra_threads(2)
-            .map_err(|e| format!("Thread config error: {e}"))?
-            .commit_from_file(&decoder_path)
-            .map_err(|e| format!("Failed to load decoder: {e}"))?;
+    let decoder = if merged_decoder_path.exists() {
+        match decoder_builder()?
+            .commit_from_file(&merged_decoder_path)
+            .map_err(|e| format!("Failed to load merged decoder: {e}"))
+        {
+            Ok(session) => session,
+            Err(merged_error) => {
+                log::warn!("Merged decoder failed, trying decoder_model.onnx fallback: {merged_error}");
+                decoder_builder()?
+                    .commit_from_file(&plain_decoder_path)
+                    .map_err(|e| format!("Failed to load fallback decoder: {e}"))?
+            }
+        }
+    } else {
+        decoder_builder()?
+            .commit_from_file(&plain_decoder_path)
+            .map_err(|e| format!("Failed to load decoder: {e}"))?
+    };
 
-        let tokenizer = Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| format!("Failed to load tokenizer: {e}"))?;
+    let tokenizer = Tokenizer::from_file(&tokenizer_path)
+        .map_err(|e| format!("Failed to load tokenizer: {e}"))?;
 
-        log::info!("Translation engine loaded successfully");
-
-        Ok(TranslationEngine {
-            encoder: Mutex::new(encoder),
-            decoder: Mutex::new(decoder),
-            tokenizer,
-        })
+    let engine = Arc::new(TranslationEngine {
+        encoder: Mutex::new(encoder),
+        decoder: Mutex::new(decoder),
+        tokenizer,
     });
 
-    // Check if initialization succeeded
-    match ENGINE.get() {
-        Some(Ok(_)) => Ok(()),
-        Some(Err(e)) => Err(e.clone()),
-        None => Err("Engine not initialized".to_string()),
-    }
+    let mut slot = engine_slot()
+        .write()
+        .map_err(|e| format!("Engine write lock error: {e}"))?;
+    *slot = Some(engine);
+
+    log::info!("Translation engine loaded successfully");
+    Ok(())
 }
 
 /// Translate the given text. The engine must be initialized first via `init()`.
 pub fn translate(text: &str) -> Result<String, String> {
-    let engine = ENGINE
-        .get()
-        .ok_or("Translation engine not initialized")?
-        .as_ref()
-        .map_err(|e| e.clone())?;
+    let engine = {
+        let slot = engine_slot()
+            .read()
+            .map_err(|e| format!("Engine read lock error: {e}"))?;
+        slot
+            .as_ref()
+            .cloned()
+            .ok_or("Translation engine not initialized")?
+    };
 
     if text.trim().is_empty() {
         return Ok(String::new());

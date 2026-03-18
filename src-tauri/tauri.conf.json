@@ -12,12 +12,27 @@
   "app": {
     "windows": [
       {
-        "label": "main",
-        "title": "Transit",
+        "label": "control",
+        "title": "Transit Control",
+        "transparent": false,
+        "decorations": true,
+        "alwaysOnTop": false,
+        "resizable": true,
+        "width": 460,
+        "height": 360,
+        "x": 120,
+        "y": 120
+      },
+      {
+        "label": "overlay",
+        "title": "Transit Overlay",
         "transparent": true,
         "decorations": false,
         "alwaysOnTop": true,
         "resizable": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "focus": false,
         "width": 900,
         "height": 180,
         "x": 250,
