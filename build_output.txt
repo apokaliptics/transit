@@ -1,0 +1,27 @@
+﻿cargo :     Blocking 
+waiting for file lock 
+on build directory
+At line:1 char:1
++ cargo check 2>&1 | 
+Out-File -FilePath d:\o
+nscreen-translator\buil
+d_ou ...
++ ~~~~~~~~~~~~~~~~
+    + CategoryInfo     
+         : NotSpecifi  
+  ed: (    Blocking    
+ wa...build directo    
+ry:String) [], Rem    
+oteException
+    + FullyQualifiedEr 
+   rorId : NativeComm  
+  andError
+ 
+    Checking 
+onscreen-translator 
+v0.1.0 (D:\onscreen-tra
+nslator\src-tauri)
+    Finished `dev` 
+profile [unoptimized + 
+debuginfo] target(s) 
+in 2.94s

@@ -1,0 +1,60 @@
+[package]
+name = "transit"
+version = "0.1.0"
+description = "Real-time screen translation overlay"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+name = "onscreen_translator_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+log = "0.4"
+env_logger = "0.11"
+
+# Screen capture
+xcap = "0.9"
+image = "0.25"
+
+# Image hashing for diff detection
+sha2 = "0.10"
+
+# Model downloading
+reqwest = { version = "0.11", features = ["stream"] }
+futures-util = "0.3"
+
+# Tensor operations for ONNX inference
+ndarray = "0.17"
+
+
+# Windows OCR (native API)
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Media_Ocr",
+    "Graphics_Imaging",
+    "Storage_Streams",
+    "Globalization",
+    "Foundation",
+    "Foundation_Collections",
+] }
+
+
+# ONNX inference (via ort - Microsoft ONNX Runtime bindings)
+[dependencies.ort]
+version = "2.0.0-rc.12"
+features = ["download-binaries"]
+
+
+# Tokenizer
+[dependencies.tokenizers]
+version = "0.20"
+features = ["onig"]
