@@ -329,7 +329,19 @@ fn overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
 fn safe_init_engine(model_dir: &std::path::Path) -> Result<(), String> {
     match catch_unwind(AssertUnwindSafe(|| translate::init(model_dir))) {
         Ok(result) => result,
-        Err(_) => Err("Model initialization panicked. Reinstall model files for this language.".to_string()),
+        Err(payload) => {
+            let panic_message = if let Some(msg) = payload.downcast_ref::<&str>() {
+                (*msg).to_string()
+            } else if let Some(msg) = payload.downcast_ref::<String>() {
+                msg.clone()
+            } else {
+                "non-string panic payload".to_string()
+            };
+
+            Err(format!(
+                "Model initialization panicked: {panic_message}. Reinstall model files for this language."
+            ))
+        }
     }
 }
 

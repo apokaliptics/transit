@@ -83,28 +83,6 @@ pub async fn download_file(
     Ok(())
 }
 
-async fn try_download_variant(
-    app: &AppHandle,
-    client: &Client,
-    base_url: &str,
-    filename1: &str,
-    filename2: &str,
-    save_dir: &Path,
-) -> Result<(), String> {
-    let url1 = format!("{base_url}/{filename1}");
-    let save_path1 = save_dir.join(filename1);
-    
-    match download_file(app, client, &url1, filename1, &save_path1).await {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            log::warn!("Failed to download {}, trying fallback {}. Error: {}", filename1, filename2, e);
-            let url2 = format!("{base_url}/{filename2}");
-            let save_path2 = save_dir.join(filename2);
-            download_file(app, client, &url2, filename2, &save_path2).await
-        }
-    }
-}
-
 #[tauri::command]
 pub async fn download_models(app: AppHandle, language_pair: String) -> Result<String, String> {
     let local_data_dir = app.path().app_local_data_dir()
@@ -139,15 +117,25 @@ pub async fn download_models(app: AppHandle, language_pair: String) -> Result<St
         &model_dir.join("encoder_model.onnx")
     ).await?;
 
-    // 3. Download Decoder Model (try merged first, fallback to regular)
-    try_download_variant(
+    // 3. Download Decoder Model (plain first for stability, merged as fallback)
+    let plain_decoder = download_file(
         &app,
         &client,
-        &onnx_base_url,
-        "decoder_model_merged.onnx",
+        &format!("{onnx_base_url}/decoder_model.onnx"),
         "decoder_model.onnx",
-        &model_dir
-    ).await?;
+        &model_dir.join("decoder_model.onnx")
+    ).await;
+
+    if let Err(plain_err) = plain_decoder {
+        log::warn!("Failed to download decoder_model.onnx, trying merged fallback: {plain_err}");
+        download_file(
+            &app,
+            &client,
+            &format!("{onnx_base_url}/decoder_model_merged.onnx"),
+            "decoder_model_merged.onnx",
+            &model_dir.join("decoder_model_merged.onnx")
+        ).await?;
+    }
 
     Ok(model_dir.to_string_lossy().to_string())
 }

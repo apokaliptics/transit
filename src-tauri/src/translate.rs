@@ -1,6 +1,7 @@
 use ort::session::Session;
 use ort::value::Value;
 use std::path::Path;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use tokenizers::Tokenizer;
 
@@ -16,6 +17,33 @@ static ENGINE: OnceLock<RwLock<Option<Arc<TranslationEngine>>>> = OnceLock::new(
 
 fn engine_slot() -> &'static RwLock<Option<Arc<TranslationEngine>>> {
     ENGINE.get_or_init(|| RwLock::new(None))
+}
+
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(msg) = payload.downcast_ref::<&str>() {
+        (*msg).to_string()
+    } else if let Some(msg) = payload.downcast_ref::<String>() {
+        msg.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
+fn commit_session(path: &Path, label: &str) -> Result<Session, String> {
+    match catch_unwind(AssertUnwindSafe(|| {
+        Session::builder()
+            .map_err(|e| format!("Session builder error: {e}"))?
+            .with_intra_threads(2)
+            .map_err(|e| format!("Thread config error: {e}"))?
+            .commit_from_file(path)
+            .map_err(|e| format!("Failed to load {label}: {e}"))
+    })) {
+        Ok(result) => result,
+        Err(payload) => {
+            let panic_msg = panic_payload_to_string(payload);
+            Err(format!("{label} panicked during load: {panic_msg}"))
+        }
+    }
 }
 
 /// Initialize the translation engine by loading model files from the given directory.
@@ -42,37 +70,27 @@ pub fn init(model_dir: &Path) -> Result<(), String> {
         return Err("Decoder model not found (expected decoder_model_merged.onnx or decoder_model.onnx)".to_string());
     }
 
-    let encoder = Session::builder()
-        .map_err(|e| format!("Session builder error: {e}"))?
-        .with_intra_threads(2)
-        .map_err(|e| format!("Thread config error: {e}"))?
-        .commit_from_file(&encoder_path)
-        .map_err(|e| format!("Failed to load encoder: {e}"))?;
+    let encoder = commit_session(&encoder_path, "encoder model")?;
 
-    let decoder_builder = || {
-        Session::builder()
-            .map_err(|e| format!("Session builder error: {e}"))?
-            .with_intra_threads(2)
-            .map_err(|e| format!("Thread config error: {e}"))
-    };
-
-    let decoder = if merged_decoder_path.exists() {
-        match decoder_builder()?
-            .commit_from_file(&merged_decoder_path)
-            .map_err(|e| format!("Failed to load merged decoder: {e}"))
-        {
+    // Prefer plain decoder for stability; use merged as fallback.
+    let decoder = if plain_decoder_path.exists() {
+        match commit_session(&plain_decoder_path, "decoder_model.onnx") {
             Ok(session) => session,
-            Err(merged_error) => {
-                log::warn!("Merged decoder failed, trying decoder_model.onnx fallback: {merged_error}");
-                decoder_builder()?
-                    .commit_from_file(&plain_decoder_path)
-                    .map_err(|e| format!("Failed to load fallback decoder: {e}"))?
+            Err(plain_error) => {
+                if merged_decoder_path.exists() {
+                    log::warn!(
+                        "Plain decoder failed, trying merged decoder fallback: {plain_error}"
+                    );
+                    commit_session(&merged_decoder_path, "decoder_model_merged.onnx")?
+                } else {
+                    return Err(format!(
+                        "Failed to load decoder_model.onnx and no merged fallback exists: {plain_error}"
+                    ));
+                }
             }
         }
     } else {
-        decoder_builder()?
-            .commit_from_file(&plain_decoder_path)
-            .map_err(|e| format!("Failed to load decoder: {e}"))?
+        commit_session(&merged_decoder_path, "decoder_model_merged.onnx")?
     };
 
     let tokenizer = Tokenizer::from_file(&tokenizer_path)
