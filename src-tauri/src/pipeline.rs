@@ -154,10 +154,6 @@ impl ParagraphBlock {
         (self.right - self.left).max(0) as u32
     }
 
-    fn height(&self) -> u32 {
-        (self.bottom - self.top).max(0) as u32
-    }
-
     fn average_height(&self) -> f32 {
         self.total_height as f32 / self.lines.len().max(1) as f32
     }
@@ -175,10 +171,125 @@ impl ParagraphBlock {
             .last()
             .expect("ParagraphBlock always contains at least one line")
     }
+}
 
-    fn source_text(&self) -> String {
-        join_lines_into_paragraph(&self.lines)
+#[derive(Clone, Debug)]
+struct TranslationBlock {
+    source_text: String,
+    left: i32,
+    top: i32,
+    width: u32,
+    height: u32,
+}
+
+fn is_cjk_text_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{3040}'..='\u{30ff}'
+            | '\u{3400}'..='\u{4dbf}'
+            | '\u{4e00}'..='\u{9fff}'
+            | '\u{f900}'..='\u{faff}'
+            | '\u{ac00}'..='\u{d7af}'
+    )
+}
+
+fn is_cjk_open_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        '（' | '《' | '「' | '『' | '【' | '〔' | '〈' | '“' | '‘'
+    )
+}
+
+fn is_cjk_close_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        '）' | '》'
+            | '」'
+            | '』'
+            | '】'
+            | '〕'
+            | '〉'
+            | '”'
+            | '’'
+            | '。'
+            | '，'
+            | '、'
+            | '！'
+            | '？'
+            | '；'
+            | '：'
+            | '…'
+    )
+}
+
+fn should_elide_ocr_space(prev: char, next: char) -> bool {
+    ((is_cjk_text_char(prev) || is_cjk_close_punctuation(prev))
+        && (is_cjk_text_char(next)
+            || is_cjk_open_punctuation(next)
+            || is_cjk_close_punctuation(next)))
+        || (is_cjk_open_punctuation(prev)
+            && (is_cjk_text_char(next) || is_cjk_open_punctuation(next)))
+}
+
+fn normalize_translation_source(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut normalized = String::with_capacity(text.len());
+    let mut last_emitted: Option<char> = None;
+    let mut idx = 0usize;
+
+    while idx < chars.len() {
+        let ch = chars[idx];
+        if ch.is_whitespace() {
+            let mut next_idx = idx + 1;
+            while next_idx < chars.len() && chars[next_idx].is_whitespace() {
+                next_idx += 1;
+            }
+
+            if let (Some(prev), Some(&next)) = (last_emitted, chars.get(next_idx)) {
+                if should_elide_ocr_space(prev, next) {
+                    idx = next_idx;
+                    continue;
+                }
+
+                if prev != ' ' {
+                    normalized.push(' ');
+                    last_emitted = Some(' ');
+                }
+            }
+
+            idx = next_idx;
+            continue;
+        }
+
+        normalized.push(ch);
+        last_emitted = Some(ch);
+        idx += 1;
     }
+
+    normalized.trim().to_string()
+}
+
+fn is_probably_english_text(text: &str) -> bool {
+    let mut ascii_alpha = 0usize;
+    let mut cjk_chars = 0usize;
+    let mut meaningful_chars = 0usize;
+
+    for ch in text.chars() {
+        if ch.is_ascii_alphabetic() {
+            ascii_alpha += 1;
+            meaningful_chars += 1;
+        } else if is_cjk_text_char(ch) {
+            cjk_chars += 1;
+            meaningful_chars += 1;
+        } else if ch.is_ascii_digit() {
+            meaningful_chars += 1;
+        }
+    }
+
+    ascii_alpha >= 4
+        && cjk_chars == 0
+        && meaningful_chars > 0
+        && ascii_alpha.saturating_mul(100) >= meaningful_chars.saturating_mul(65)
 }
 
 fn join_lines_into_paragraph(lines: &[ocr::OcrLine]) -> String {
@@ -219,7 +330,18 @@ fn join_lines_into_paragraph(lines: &[ocr::OcrLine]) -> String {
         }
     }
 
-    paragraph
+    normalize_translation_source(&paragraph)
+}
+
+fn normalize_ocr_text(text: &str) -> String {
+    let joined = text
+        .lines()
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    normalize_translation_source(&joined)
 }
 
 fn horizontal_overlap_ratio(block: &ParagraphBlock, line: &ocr::OcrLine) -> f32 {
@@ -300,6 +422,194 @@ fn group_lines_into_blocks(mut lines: Vec<ocr::OcrLine>) -> Vec<ParagraphBlock> 
     blocks
 }
 
+fn build_translation_blocks(
+    paragraph_blocks: &[ParagraphBlock],
+    all_lines: &[ocr::OcrLine],
+    ocr_source_text: &str,
+    capture_width: u32,
+    capture_height: u32,
+) -> Vec<TranslationBlock> {
+    let line_blocks: Vec<TranslationBlock> = all_lines
+        .iter()
+        .filter_map(|line| translation_block_from_lines(std::slice::from_ref(line)))
+        .collect();
+
+    if !line_blocks.is_empty() {
+        return line_blocks;
+    }
+
+    let mut blocks: Vec<TranslationBlock> = paragraph_blocks
+        .iter()
+        .filter_map(|block| translation_block_from_lines(&block.lines))
+        .collect();
+
+    if !blocks.is_empty() {
+        return blocks;
+    }
+
+    let fallback_source = normalize_ocr_text(ocr_source_text);
+    if fallback_source.is_empty() {
+        return blocks;
+    }
+
+    let geometry_lines: Vec<&ocr::OcrLine> = all_lines
+        .iter()
+        .filter(|line| !line.text.trim().is_empty() && line.width > 0 && line.height > 0)
+        .collect();
+
+    let (left, top, width, height) = if geometry_lines.is_empty() {
+        (0, 0, capture_width.max(8), capture_height.max(16))
+    } else {
+        let left = geometry_lines
+            .iter()
+            .map(|line| line.left)
+            .min()
+            .unwrap_or(0)
+            .max(0);
+        let top = geometry_lines
+            .iter()
+            .map(|line| line.top)
+            .min()
+            .unwrap_or(0)
+            .max(0);
+        let right = geometry_lines
+            .iter()
+            .map(|line| line.left + line.width as i32)
+            .max()
+            .unwrap_or(capture_width as i32);
+        let bottom = geometry_lines
+            .iter()
+            .map(|line| line.top + line.height as i32)
+            .max()
+            .unwrap_or(capture_height as i32);
+
+        (
+            left,
+            top,
+            (right - left).max(8) as u32,
+            (bottom - top).max(16) as u32,
+        )
+    };
+
+    blocks.push(TranslationBlock {
+        source_text: fallback_source,
+        left,
+        top,
+        width,
+        height,
+    });
+
+    blocks
+}
+
+fn translation_block_from_lines(lines: &[ocr::OcrLine]) -> Option<TranslationBlock> {
+    if lines.is_empty() {
+        return None;
+    }
+
+    let source_text = join_lines_into_paragraph(lines);
+    if source_text.trim().is_empty() {
+        return None;
+    }
+
+    let left = lines.iter().map(|line| line.left).min().unwrap_or(0).max(0);
+    let top = lines.iter().map(|line| line.top).min().unwrap_or(0).max(0);
+    let right = lines
+        .iter()
+        .map(|line| line.left + line.width as i32)
+        .max()
+        .unwrap_or(left);
+    let bottom = lines
+        .iter()
+        .map(|line| line.top + line.height as i32)
+        .max()
+        .unwrap_or(top);
+
+    Some(TranslationBlock {
+        source_text,
+        left,
+        top,
+        width: (right - left).max(8) as u32,
+        height: (bottom - top).max(16) as u32,
+    })
+}
+
+fn build_payload_text(
+    translated_lines: &[TranslatedLine],
+    fallback_source_text: &str,
+) -> (String, String) {
+    if translated_lines.is_empty() {
+        return (
+            fallback_source_text.to_string(),
+            fallback_source_text.to_string(),
+        );
+    }
+
+    let source_text = translated_lines
+        .iter()
+        .map(|line| line.source_text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    let translated_text = translated_lines
+        .iter()
+        .map(|line| line.translated_text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    (source_text, translated_text)
+}
+
+fn build_translation_payload(
+    frame_id: u64,
+    translated_lines: &[TranslatedLine],
+    fallback_source_text: &str,
+    capture_scale: f64,
+    backend_label: &str,
+) -> TranslationPayload {
+    let (source_text, translated_text) = build_payload_text(translated_lines, fallback_source_text);
+
+    TranslationPayload {
+        frame_id,
+        text: translated_text,
+        source_text,
+        lines: translated_lines.to_vec(),
+        capture_scale: if capture_scale.is_finite() && capture_scale > 0.0 {
+            capture_scale
+        } else {
+            1.0
+        },
+        ocr_backend: backend_label.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_translation_source_collapses_cjk_spacing() {
+        let text = "我 最 后 一 次 见 到 他 是 在 海 滩 。";
+        assert_eq!(
+            normalize_translation_source(text),
+            "我最后一次见到他是在海滩。"
+        );
+    }
+
+    #[test]
+    fn normalize_translation_source_preserves_latin_spacing() {
+        let text = "The Sound Of.. 我 最 后";
+        assert_eq!(normalize_translation_source(text), "The Sound Of.. 我最后");
+    }
+
+    #[test]
+    fn english_detection_ignores_ascii_sentences() {
+        assert!(is_probably_english_text("The Sound of Metal"));
+        assert!(!is_probably_english_text("最后一次见到他"));
+        assert!(!is_probably_english_text("Chapter 7 最后的海滩"));
+    }
+}
+
 #[derive(Clone, serde::Serialize)]
 pub struct TranslatedLine {
     pub line_id: String,
@@ -373,31 +683,19 @@ pub async fn run_pipeline(
         let (x, y, width, height) = if let Some(region) = locked_region {
             (region.x, region.y, region.width, region.height)
         } else {
+            let _ = window.emit(
+                "ocr-status",
+                OcrStatusPayload {
+                    state: "warning".to_string(),
+                    language_pair: "".to_string(),
+                    message: "Capture region is not set yet".to_string(),
+                    backend: "auto".to_string(),
+                    language_tag: "".to_string(),
+                    used_profile_fallback: false,
+                },
+            );
             tokio::time::sleep(std::time::Duration::from_millis(180)).await;
             continue;
-        };
-
-        // Step 1: Capture the screen region and check for changes
-        let capture_result =
-            tokio::task::spawn_blocking(move || capture::capture_region(x, y, width, height)).await;
-
-        let image = match capture_result {
-            Ok(Ok(Some(img))) => img,
-            Ok(Ok(None)) => {
-                // No change detected, skip
-                tokio::time::sleep(std::time::Duration::from_millis(180)).await;
-                continue;
-            }
-            Ok(Err(e)) => {
-                log::warn!("Capture error: {e}");
-                tokio::time::sleep(std::time::Duration::from_millis(180)).await;
-                continue;
-            }
-            Err(e) => {
-                log::warn!("Capture task join error: {e}");
-                tokio::time::sleep(std::time::Duration::from_millis(180)).await;
-                continue;
-            }
         };
 
         let current_language = match language_pair.lock() {
@@ -417,6 +715,62 @@ pub async fn run_pipeline(
         };
         let backend = ocr::OcrBackend::from_str(&backend_value);
         let backend_label = backend.as_str().to_string();
+
+        // Step 1: Capture the screen region and check for changes
+        let capture_result =
+            tokio::task::spawn_blocking(move || capture::capture_region(x, y, width, height)).await;
+
+        let image = match capture_result {
+            Ok(Ok(Some(img))) => img,
+            Ok(Ok(None)) => {
+                // No change detected, skip
+                let _ = window.emit(
+                    "ocr-status",
+                    OcrStatusPayload {
+                        state: "warning".to_string(),
+                        language_pair: current_language.clone(),
+                        message: "No visual change detected in selected region".to_string(),
+                        backend: backend_label.clone(),
+                        language_tag: "".to_string(),
+                        used_profile_fallback: false,
+                    },
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(180)).await;
+                continue;
+            }
+            Ok(Err(e)) => {
+                log::warn!("Capture error: {e}");
+                let _ = window.emit(
+                    "ocr-status",
+                    OcrStatusPayload {
+                        state: "error".to_string(),
+                        language_pair: current_language.clone(),
+                        message: format!("Capture failed: {e}"),
+                        backend: backend_label.clone(),
+                        language_tag: "".to_string(),
+                        used_profile_fallback: false,
+                    },
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(180)).await;
+                continue;
+            }
+            Err(e) => {
+                log::warn!("Capture task join error: {e}");
+                let _ = window.emit(
+                    "ocr-status",
+                    OcrStatusPayload {
+                        state: "error".to_string(),
+                        language_pair: current_language.clone(),
+                        message: format!("Capture task failed: {e}"),
+                        backend: backend_label.clone(),
+                        language_tag: "".to_string(),
+                        used_profile_fallback: false,
+                    },
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(180)).await;
+                continue;
+            }
+        };
 
         // Step 2: Run OCR
         let ocr_language = current_language.clone();
@@ -485,23 +839,41 @@ pub async fn run_pipeline(
         log::info!("OCR detected: {}", &ocr_source_text);
 
         // Step 3: Group OCR lines into paragraph-like blocks before translation.
-        let paragraph_blocks = group_lines_into_blocks(dedupe_lines(ocr_output.lines.clone()));
+        let deduped_lines = dedupe_lines(ocr_output.lines.clone());
+        let paragraph_blocks = group_lines_into_blocks(deduped_lines.clone());
+        let translation_blocks = build_translation_blocks(
+            &paragraph_blocks,
+            &deduped_lines,
+            &ocr_source_text,
+            width,
+            height,
+        );
 
-        let mut translated_lines = Vec::with_capacity(paragraph_blocks.len());
-        for block in &paragraph_blocks {
-            let block_source = block.source_text();
-            if block_source.trim().is_empty() {
+        let scale = match capture_scale.lock() {
+            Ok(guard) => *guard,
+            Err(e) => {
+                log::warn!("Capture scale lock error: {e}");
+                1.0
+            }
+        };
+        let next_frame_id = frame_id.wrapping_add(1);
+
+        let mut translated_lines = Vec::with_capacity(translation_blocks.len());
+        let mut translation_warning: Option<String> = None;
+        let mut ignored_english_blocks = 0usize;
+        for block in translation_blocks {
+            let block_source = block.source_text;
+            if is_probably_english_text(&block_source) {
+                ignored_english_blocks += 1;
                 continue;
             }
 
-            let block_width = block.width();
-            let block_height = block.height();
             let line_id = make_line_id(
                 &block_source,
                 block.left,
                 block.top,
-                block_width,
-                block_height,
+                block.width,
+                block.height,
             );
 
             if let Some(cached) = translation_cache.get(&block_source) {
@@ -511,8 +883,8 @@ pub async fn run_pipeline(
                     translated_text: cached.clone(),
                     left: block.left,
                     top: block.top,
-                    width: block_width,
-                    height: block_height,
+                    width: block.width,
+                    height: block.height,
                 });
                 continue;
             }
@@ -521,26 +893,36 @@ pub async fn run_pipeline(
             let block_translate_result =
                 tokio::task::spawn_blocking(move || translate::translate(&source_for_task)).await;
 
-            let block_translated = match block_translate_result {
-                Ok(Ok(text)) if !text.trim().is_empty() => text,
-                Ok(Ok(_)) => block_source.clone(),
+            let (block_translated, should_cache) = match block_translate_result {
+                Ok(Ok(text)) if !text.trim().is_empty() => (text, true),
+                Ok(Ok(_)) => {
+                    translation_warning =
+                        Some("Text detected, but translation returned an empty result".to_string());
+                    (block_source.clone(), false)
+                }
                 Ok(Err(e)) => {
                     log::warn!("Block translation error: {e}");
-                    block_source.clone()
+                    translation_warning =
+                        Some(format!("Text detected, but translation failed: {e}"));
+                    (block_source.clone(), false)
                 }
                 Err(e) => {
                     log::warn!("Block translation join error: {e}");
-                    block_source.clone()
+                    translation_warning =
+                        Some(format!("Text detected, but translation task failed: {e}"));
+                    (block_source.clone(), false)
                 }
             };
 
-            cache_insert(
-                &mut translation_cache,
-                &mut cache_order,
-                block_source.clone(),
-                block_translated.clone(),
-                CACHE_CAPACITY,
-            );
+            if should_cache {
+                cache_insert(
+                    &mut translation_cache,
+                    &mut cache_order,
+                    block_source.clone(),
+                    block_translated.clone(),
+                    CACHE_CAPACITY,
+                );
+            }
 
             translated_lines.push(TranslatedLine {
                 line_id,
@@ -548,54 +930,50 @@ pub async fn run_pipeline(
                 translated_text: block_translated,
                 left: block.left,
                 top: block.top,
-                width: block_width,
-                height: block_height,
+                width: block.width,
+                height: block.height,
             });
+
+            let payload = build_translation_payload(
+                next_frame_id,
+                &translated_lines,
+                &ocr_source_text,
+                scale,
+                &backend_label,
+            );
+
+            if let Err(e) = window.emit("translation-update", &payload) {
+                log::warn!("Failed to emit translation event: {e}");
+            }
         }
 
-        let source_text = if translated_lines.is_empty() {
-            ocr_source_text.clone()
-        } else {
-            translated_lines
-                .iter()
-                .map(|line| line.source_text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        };
-
-        let translated = if translated_lines.is_empty() {
-            ocr_source_text.clone()
-        } else {
-            translated_lines
-                .iter()
-                .map(|line| line.translated_text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        };
+        let (_source_text, translated) = build_payload_text(&translated_lines, &ocr_source_text);
 
         log::info!("Translated: {}", &translated);
 
-        let scale = match capture_scale.lock() {
-            Ok(guard) => *guard,
-            Err(e) => {
-                log::warn!("Capture scale lock error: {e}");
-                1.0
-            }
-        };
-
         // Step 4: Emit to frontend
-        frame_id = frame_id.wrapping_add(1);
-        let payload = TranslationPayload {
-            frame_id,
-            text: translated,
-            source_text,
-            lines: translated_lines,
-            capture_scale: if scale.is_finite() && scale > 0.0 {
-                scale
-            } else {
-                1.0
-            },
-            ocr_backend: backend_label.clone(),
+        frame_id = next_frame_id;
+        let payload = if translated_lines.is_empty() && ignored_english_blocks > 0 {
+            TranslationPayload {
+                frame_id,
+                text: String::new(),
+                source_text: String::new(),
+                lines: Vec::new(),
+                capture_scale: if scale.is_finite() && scale > 0.0 {
+                    scale
+                } else {
+                    1.0
+                },
+                ocr_backend: backend_label.clone(),
+            }
+        } else {
+            build_translation_payload(
+                frame_id,
+                &translated_lines,
+                &ocr_source_text,
+                scale,
+                &backend_label,
+            )
         };
 
         if let Err(e) = window.emit("translation-update", &payload) {
@@ -605,16 +983,27 @@ pub async fn run_pipeline(
         let _ = window.emit(
             "ocr-status",
             OcrStatusPayload {
-                state: if used_profile_fallback {
+                state: if translated_lines.is_empty() && ignored_english_blocks > 0 {
+                    "ignored".to_string()
+                } else if used_profile_fallback || translation_warning.is_some() {
                     "warning".to_string()
                 } else {
                     "ok".to_string()
                 },
                 language_pair: current_language,
-                message: if used_profile_fallback {
-                    "Text detected, but OCR language fallback was used".to_string()
+                message: if translated_lines.is_empty() && ignored_english_blocks > 0 {
+                    "English text detected; skipping translation".to_string()
                 } else {
-                    "Text detected".to_string()
+                    match (used_profile_fallback, translation_warning) {
+                    (true, Some(translation_warning)) => {
+                        format!(
+                            "Text detected, but OCR language fallback was used. {translation_warning}"
+                        )
+                    }
+                    (true, None) => "Text detected, but OCR language fallback was used".to_string(),
+                    (false, Some(translation_warning)) => translation_warning,
+                    (false, None) => "Text detected".to_string(),
+                    }
                 },
                 backend: backend_label,
                 language_tag: effective_language_tag,

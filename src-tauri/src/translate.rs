@@ -14,10 +14,12 @@ struct TranslationEngine {
     decoder: Mutex<Session>,
     tokenizer: Tokenizer,
     decoder_start_token_id: i64,
+    forced_bos_token_id: Option<i64>,
     eos_token_id: i64,
     max_length: usize,
     beam_size: usize,
     length_penalty: f32,
+    min_generated_tokens: usize,
 }
 
 static ENGINE: OnceLock<RwLock<Option<Arc<TranslationEngine>>>> = OnceLock::new();
@@ -25,21 +27,26 @@ static ENGINE: OnceLock<RwLock<Option<Arc<TranslationEngine>>>> = OnceLock::new(
 #[derive(Debug, Clone, Copy)]
 struct GenerationSettings {
     decoder_start_token_id: i64,
+    forced_bos_token_id: Option<i64>,
     eos_token_id: i64,
     max_length: usize,
     beam_size: usize,
     length_penalty: f32,
+    min_generated_tokens: usize,
 }
 
 #[derive(Debug, Deserialize)]
 struct GenerationConfig {
     decoder_start_token_id: Option<i64>,
+    forced_bos_token_id: Option<i64>,
     eos_token_id: Option<i64>,
     forced_eos_token_id: Option<i64>,
     pad_token_id: Option<i64>,
     max_length: Option<usize>,
     num_beams: Option<usize>,
     length_penalty: Option<f32>,
+    min_length: Option<usize>,
+    min_new_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +127,40 @@ fn sanitize_precompiled_normalizers(value: &mut serde_json::Value) {
     }
 }
 
+fn has_precompiled_compat_issues(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            let is_precompiled = map
+                .get("type")
+                .and_then(|v| v.as_str())
+                .map(|t| t == "Precompiled")
+                .unwrap_or(false);
+
+            if is_precompiled {
+                if map
+                    .get("precompiled_charsmap")
+                    .map(|value| value.is_null() || value.as_str() == Some(""))
+                    .unwrap_or(true)
+                {
+                    return true;
+                }
+
+                if map
+                    .get("precompiled")
+                    .map(|value| value.is_null())
+                    .unwrap_or(false)
+                {
+                    return true;
+                }
+            }
+
+            map.values().any(has_precompiled_compat_issues)
+        }
+        serde_json::Value::Array(items) => items.iter().any(has_precompiled_compat_issues),
+        _ => false,
+    }
+}
+
 fn is_invalid_precompiled_normalizer(map: &serde_json::Map<String, serde_json::Value>) -> bool {
     map.get("type")
         .and_then(|value| value.as_str())
@@ -181,7 +222,38 @@ fn load_tokenizer_from_bytes(bytes: &[u8], label: &str) -> Result<Tokenizer, Str
     }
 }
 
+fn load_tokenizer_with_compat_json(raw: &str, label: &str) -> Result<Tokenizer, String> {
+    let mut json: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|e| format!("Failed to parse tokenizer JSON for fallback: {e}"))?;
+
+    sanitize_precompiled_normalizers(&mut json);
+
+    if strip_invalid_precompiled_normalizers(&mut json) {
+        log::warn!(
+            "Tokenizer JSON contains invalid Precompiled normalizer nodes; stripping incompatible entries before load"
+        );
+    }
+
+    let normalized = serde_json::to_vec(&json)
+        .map_err(|e| format!("Failed to serialize fallback tokenizer JSON: {e}"))?;
+
+    load_tokenizer_from_bytes(&normalized, label)
+}
+
 fn load_tokenizer(tokenizer_path: &Path) -> Result<Tokenizer, String> {
+    let raw = fs::read_to_string(tokenizer_path)
+        .map_err(|e| format!("Failed to read tokenizer.json: {e}"))?;
+
+    if serde_json::from_str::<serde_json::Value>(&raw)
+        .map(|json| has_precompiled_compat_issues(&json))
+        .unwrap_or(false)
+    {
+        log::warn!(
+            "Tokenizer JSON contains known incompatible Precompiled normalizer fields; applying compatibility sanitizer before load"
+        );
+        return load_tokenizer_with_compat_json(&raw, "compatibility tokenizer fallback");
+    }
+
     match catch_unwind(AssertUnwindSafe(|| Tokenizer::from_file(tokenizer_path))) {
         Ok(Ok(tokenizer)) => return Ok(tokenizer),
         Ok(Err(primary_error)) => {
@@ -202,35 +274,7 @@ fn load_tokenizer(tokenizer_path: &Path) -> Result<Tokenizer, String> {
         "Tokenizer deserialize failed with known Precompiled null-field issue, applying compatibility sanitizer"
     );
 
-    let raw = fs::read_to_string(tokenizer_path)
-        .map_err(|e| format!("Failed to read tokenizer for fallback: {e}"))?;
-
-    let mut json: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| format!("Failed to parse tokenizer JSON for fallback: {e}"))?;
-
-    sanitize_precompiled_normalizers(&mut json);
-
-    let normalized = serde_json::to_vec(&json)
-        .map_err(|e| format!("Failed to serialize fallback tokenizer JSON: {e}"))?;
-
-    match load_tokenizer_from_bytes(&normalized, "sanitized tokenizer fallback") {
-        Ok(tokenizer) => Ok(tokenizer),
-        Err(sanitized_error) => {
-            if !strip_invalid_precompiled_normalizers(&mut json) {
-                return Err(sanitized_error);
-            }
-
-            log::warn!(
-                "Sanitized tokenizer still failed; stripping invalid Precompiled normalizer nodes with missing charsmap"
-            );
-
-            let stripped = serde_json::to_vec(&json)
-                .map_err(|e| format!("Failed to serialize stripped tokenizer JSON: {e}"))?;
-
-            load_tokenizer_from_bytes(&stripped, "stripped tokenizer fallback")
-                .map_err(|stripped_error| format!("{sanitized_error}; {stripped_error}"))
-        }
-    }
+    load_tokenizer_with_compat_json(&raw, "compatibility tokenizer fallback")
 }
 
 fn token_id(tokenizer: &Tokenizer, token: &str) -> Option<i64> {
@@ -248,10 +292,12 @@ fn fallback_generation_settings(tokenizer: &Tokenizer) -> Result<GenerationSetti
 
     Ok(GenerationSettings {
         decoder_start_token_id,
+        forced_bos_token_id: None,
         eos_token_id,
         max_length: 512,
-        beam_size: 4,
+        beam_size: 1,
         length_penalty: 1.0,
+        min_generated_tokens: 1,
     })
 }
 
@@ -276,6 +322,7 @@ fn load_generation_settings(
             .decoder_start_token_id
             .or(config.pad_token_id)
             .unwrap_or(fallback.decoder_start_token_id),
+        forced_bos_token_id: config.forced_bos_token_id,
         eos_token_id: config
             .eos_token_id
             .or(config.forced_eos_token_id)
@@ -283,24 +330,30 @@ fn load_generation_settings(
         max_length: config.max_length.unwrap_or(fallback.max_length),
         beam_size: config.num_beams.unwrap_or(fallback.beam_size).max(1),
         length_penalty: config.length_penalty.unwrap_or(fallback.length_penalty),
+        min_generated_tokens: config
+            .min_new_tokens
+            .or(config.min_length)
+            .unwrap_or(fallback.min_generated_tokens)
+            .max(1),
     })
 }
 
-fn generated_token_count(token_ids: &[i64], eos_token_id: i64) -> usize {
-    let mut count = token_ids.len().saturating_sub(1);
+fn generated_token_count(token_ids: &[i64], eos_token_id: i64, prompt_len: usize) -> usize {
+    let mut count = token_ids.len().saturating_sub(prompt_len);
     if token_ids.last().copied() == Some(eos_token_id) {
         count = count.saturating_sub(1);
     }
-    count.max(1)
+    count
 }
 
 fn length_penalized_score(
     log_prob: f32,
     token_ids: &[i64],
     eos_token_id: i64,
+    prompt_len: usize,
     length_penalty: f32,
 ) -> f32 {
-    let length = generated_token_count(token_ids, eos_token_id) as f32;
+    let length = generated_token_count(token_ids, eos_token_id, prompt_len).max(1) as f32;
     let penalty = ((5.0 + length) / 6.0).powf(length_penalty.max(0.0));
     log_prob / penalty
 }
@@ -363,6 +416,18 @@ mod tests {
     }
 
     #[test]
+    fn has_precompiled_compat_issues_detects_null_charsmap() {
+        let value = json!({
+            "normalizer": {
+                "type": "Precompiled",
+                "precompiled_charsmap": null
+            }
+        });
+
+        assert!(has_precompiled_compat_issues(&value));
+    }
+
+    #[test]
     fn strip_invalid_precompiled_normalizers_drops_null_precompiled_nodes() {
         let mut value = json!({
             "normalizer": {
@@ -388,6 +453,33 @@ mod tests {
         assert_eq!(top[0].0, 1);
         assert_eq!(top[1].0, 3);
         assert!(top[0].1 >= top[1].1);
+    }
+
+    #[test]
+    #[ignore = "requires local zh-en model files"]
+    fn local_zh_en_model_produces_english_text() {
+        let model_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("debug")
+            .join("models")
+            .join("zh-en");
+
+        if !model_dir.exists() {
+            eprintln!(
+                "Skipping local model test because {:?} does not exist",
+                model_dir
+            );
+            return;
+        }
+
+        init(&model_dir).expect("local model should initialize");
+        let translated = translate("我最后一次见到他是在海滩。")
+            .expect("local model should translate sample text");
+
+        assert!(
+            translated.chars().any(|ch| ch.is_ascii_alphabetic()),
+            "expected English output, got: {translated}"
+        );
     }
 }
 
@@ -448,8 +540,9 @@ pub fn init(model_dir: &Path) -> Result<(), String> {
     let generation = load_generation_settings(model_dir, &tokenizer)?;
 
     log::info!(
-        "Generation settings resolved: decoder_start_token_id={}, eos_token_id={}, max_length={}, beam_size={}, length_penalty={}",
+        "Generation settings resolved: decoder_start_token_id={}, forced_bos_token_id={:?}, eos_token_id={}, max_length={}, beam_size={}, length_penalty={}",
         generation.decoder_start_token_id,
+        generation.forced_bos_token_id,
         generation.eos_token_id,
         generation.max_length,
         generation.beam_size,
@@ -461,10 +554,12 @@ pub fn init(model_dir: &Path) -> Result<(), String> {
         decoder: Mutex::new(decoder),
         tokenizer,
         decoder_start_token_id: generation.decoder_start_token_id,
+        forced_bos_token_id: generation.forced_bos_token_id,
         eos_token_id: generation.eos_token_id,
         max_length: generation.max_length,
         beam_size: generation.beam_size,
         length_penalty: generation.length_penalty,
+        min_generated_tokens: generation.min_generated_tokens,
     });
 
     let mut slot = engine_slot()
@@ -476,21 +571,140 @@ pub fn init(model_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Translate the given text. The engine must be initialized first via `init()`.
-pub fn translate(text: &str) -> Result<String, String> {
-    let engine = {
-        let slot = engine_slot()
-            .read()
-            .map_err(|e| format!("Engine read lock error: {e}"))?;
-        slot.as_ref()
-            .cloned()
-            .ok_or("Translation engine not initialized")?
-    };
+fn token_count(tokenizer: &Tokenizer, text: &str) -> Result<usize, String> {
+    let encoding = tokenizer
+        .encode(text, true)
+        .map_err(|e| format!("Tokenization error: {e}"))?;
+    Ok(encoding.get_ids().len())
+}
 
-    if text.trim().is_empty() {
-        return Ok(String::new());
+fn sentenceish_units(text: &str) -> Vec<String> {
+    let mut units = Vec::new();
+    let mut current = String::new();
+
+    for ch in text.chars() {
+        current.push(ch);
+        if matches!(ch, '\n' | '。' | '！' | '？' | '；' | ';' | '!' | '?' | '.') {
+            let unit = current.trim();
+            if !unit.is_empty() {
+                units.push(unit.to_string());
+            }
+            current.clear();
+        }
     }
 
+    let tail = current.trim();
+    if !tail.is_empty() {
+        units.push(tail.to_string());
+    }
+
+    units
+}
+
+fn split_oversized_unit(
+    tokenizer: &Tokenizer,
+    unit: &str,
+    token_limit: usize,
+) -> Result<Vec<String>, String> {
+    let chars: Vec<char> = unit.chars().collect();
+    if chars.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    while start < chars.len() {
+        let mut low = start + 1;
+        let mut high = chars.len();
+        let mut best = low;
+
+        while low <= high {
+            let mid = (low + high) / 2;
+            let candidate: String = chars[start..mid].iter().collect();
+            let count = token_count(tokenizer, &candidate)?;
+            if count <= token_limit {
+                best = mid;
+                low = mid + 1;
+            } else {
+                if mid == 0 {
+                    break;
+                }
+                high = mid - 1;
+            }
+        }
+
+        if best <= start {
+            best = (start + 1).min(chars.len());
+        }
+
+        let piece: String = chars[start..best].iter().collect();
+        let piece = piece.trim();
+        if !piece.is_empty() {
+            out.push(piece.to_string());
+        }
+        start = best;
+    }
+
+    Ok(out)
+}
+
+fn split_text_for_translation(
+    tokenizer: &Tokenizer,
+    text: &str,
+    token_limit: usize,
+) -> Result<Vec<String>, String> {
+    if token_limit == 0 {
+        return Ok(vec![text.trim().to_string()]);
+    }
+
+    let mut chunks: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    let mut units = sentenceish_units(text);
+    if units.is_empty() {
+        units.push(text.trim().to_string());
+    }
+
+    for unit in units {
+        if unit.trim().is_empty() {
+            continue;
+        }
+
+        let unit_count = token_count(tokenizer, &unit)?;
+        let expanded_units = if unit_count > token_limit {
+            split_oversized_unit(tokenizer, &unit, token_limit)?
+        } else {
+            vec![unit]
+        };
+
+        for expanded in expanded_units {
+            let candidate = if current.is_empty() {
+                expanded.clone()
+            } else {
+                format!("{} {}", current, expanded)
+            };
+
+            let candidate_count = token_count(tokenizer, &candidate)?;
+            if candidate_count <= token_limit {
+                current = candidate;
+                continue;
+            }
+
+            if !current.trim().is_empty() {
+                chunks.push(current.trim().to_string());
+            }
+            current = expanded;
+        }
+    }
+
+    if !current.trim().is_empty() {
+        chunks.push(current.trim().to_string());
+    }
+
+    Ok(chunks)
+}
+
+fn translate_single(engine: &TranslationEngine, text: &str) -> Result<String, String> {
     let encoding = engine
         .tokenizer
         .encode(text, true)
@@ -531,9 +745,17 @@ pub fn translate(text: &str) -> Result<String, String> {
         .map_err(|e| format!("Encoder run error: {e}"))?;
 
     let encoder_hidden = &encoder_outputs["last_hidden_state"];
+    let mut decoder_prompt = vec![engine.decoder_start_token_id];
+    if let Some(forced_bos) = engine.forced_bos_token_id {
+        if forced_bos != engine.decoder_start_token_id {
+            decoder_prompt.push(forced_bos);
+        }
+    }
+
+    let prompt_len = decoder_prompt.len();
     let beam_size = engine.beam_size.max(1);
     let mut active_beams = vec![Beam {
-        token_ids: vec![engine.decoder_start_token_id],
+        token_ids: decoder_prompt,
         log_prob: 0.0,
     }];
     let mut completed_beams: Vec<CompletedBeam> = Vec::new();
@@ -547,6 +769,9 @@ pub fn translate(text: &str) -> Result<String, String> {
 
         for beam in &active_beams {
             let dec_len = beam.token_ids.len();
+            let needs_min_length_guard =
+                generated_token_count(&beam.token_ids, engine.eos_token_id, prompt_len)
+                    < engine.min_generated_tokens;
 
             let decoder_input_value = Value::from_array(
                 ndarray::Array2::from_shape_vec((1, dec_len), beam.token_ids.clone())
@@ -593,10 +818,19 @@ pub fn translate(text: &str) -> Result<String, String> {
                 let last_pos = logits_seq_len - 1;
                 let offset = last_pos * vocab_size;
                 let last_logits = &logits_data[offset..offset + vocab_size];
-                top_k_log_probs(last_logits, beam_size)
+                let candidate_count = if needs_min_length_guard {
+                    beam_size.saturating_add(1)
+                } else {
+                    beam_size
+                };
+                top_k_log_probs(last_logits, candidate_count)
             };
 
             for (token_id, token_log_prob) in next_tokens {
+                if needs_min_length_guard && token_id == engine.eos_token_id {
+                    continue;
+                }
+
                 let mut next_ids = beam.token_ids.clone();
                 next_ids.push(token_id);
                 candidate_beams.push(Beam {
@@ -620,6 +854,7 @@ pub fn translate(text: &str) -> Result<String, String> {
                         candidate.log_prob,
                         &candidate.token_ids,
                         engine.eos_token_id,
+                        prompt_len,
                         engine.length_penalty,
                     ),
                     token_ids: candidate.token_ids,
@@ -641,20 +876,28 @@ pub fn translate(text: &str) -> Result<String, String> {
             beam.log_prob,
             &beam.token_ids,
             engine.eos_token_id,
+            prompt_len,
             engine.length_penalty,
         ),
         token_ids: beam.token_ids,
     }));
 
     let best_beam = completed_beams
-        .into_iter()
+        .iter()
+        .filter(|beam| generated_token_count(&beam.token_ids, engine.eos_token_id, prompt_len) > 0)
         .max_by(|left, right| left.score.total_cmp(&right.score))
+        .cloned()
+        .or_else(|| {
+            completed_beams
+                .into_iter()
+                .max_by(|left, right| left.score.total_cmp(&right.score))
+        })
         .ok_or_else(|| "Beam search produced no output".to_string())?;
 
     let output_ids: Vec<u32> = best_beam
         .token_ids
         .iter()
-        .skip(1)
+        .skip(prompt_len)
         .copied()
         .filter(|&id| id != engine.eos_token_id)
         .map(|id| id as u32)
@@ -666,4 +909,50 @@ pub fn translate(text: &str) -> Result<String, String> {
         .map_err(|e| format!("Decode error: {e}"))?;
 
     Ok(decoded)
+}
+
+/// Translate the given text. The engine must be initialized first via `init()`.
+pub fn translate(text: &str) -> Result<String, String> {
+    let engine = {
+        let slot = engine_slot()
+            .read()
+            .map_err(|e| format!("Engine read lock error: {e}"))?;
+        slot.as_ref()
+            .cloned()
+            .ok_or("Translation engine not initialized")?
+    };
+
+    if text.trim().is_empty() {
+        return Ok(String::new());
+    }
+
+    let configured_limit = engine.max_length.saturating_sub(8).max(64);
+    let total_token_count = token_count(&engine.tokenizer, text)?;
+
+    if total_token_count <= configured_limit {
+        return translate_single(&engine, text);
+    }
+
+    let chunks = split_text_for_translation(&engine.tokenizer, text, configured_limit)?;
+    if chunks.is_empty() {
+        return translate_single(&engine, text);
+    }
+
+    log::warn!(
+        "Input too long for single pass ({} tokens), translating in {} chunks",
+        total_token_count,
+        chunks.len()
+    );
+
+    let mut translated_chunks = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        let translated = translate_single(&engine, &chunk)?;
+        if translated.trim().is_empty() {
+            translated_chunks.push(chunk);
+        } else {
+            translated_chunks.push(translated);
+        }
+    }
+
+    Ok(translated_chunks.join(" "))
 }

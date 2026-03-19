@@ -8,7 +8,12 @@ static PREV_HASH: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
 /// Captures the screen region at the given coordinates and returns the image
 /// only if the content has changed since the last capture.
-pub fn capture_region(x: i32, y: i32, width: u32, height: u32) -> Result<Option<RgbaImage>, String> {
+pub fn capture_region(
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> Result<Option<RgbaImage>, String> {
     let monitors = Monitor::all().map_err(|e| format!("Failed to list monitors: {e}"))?;
 
     if width == 0 || height == 0 {
@@ -49,7 +54,8 @@ pub fn capture_region(x: i32, y: i32, width: u32, height: u32) -> Result<Option<
         let inter_w = (inter_right - inter_left) as u32;
         let inter_h = (inter_bottom - inter_top) as u32;
 
-        let piece = image::imageops::crop_imm(&screenshot, src_x, src_y, inter_w, inter_h).to_image();
+        let piece =
+            image::imageops::crop_imm(&screenshot, src_x, src_y, inter_w, inter_h).to_image();
 
         let dst_x = (inter_left - req_left) as i64;
         let dst_y = (inter_top - req_top) as i64;

@@ -40,6 +40,13 @@
     fallback_policy: string;
   }
 
+  interface PipelineState {
+    running: boolean;
+    has_task: boolean;
+    task_finished: boolean;
+    has_capture_region: boolean;
+  }
+
   interface DownloadProgress {
     downloaded: number;
     total: number | null;
@@ -114,7 +121,11 @@
   let unlistenOcrStatus: (() => void) | null = null;
   let unlistenProgress: (() => void) | null = null;
   let unlistenOverlayMode: (() => void) | null = null;
+  let unlistenClickThrough: (() => void) | null = null;
   let cleanupWindowListeners: (() => void) | null = null;
+  let pipelineWatchdogTimer: ReturnType<typeof setInterval> | null = null;
+  let pipelineRestartInFlight = false;
+  let lastPipelineSignalAtMs = $state<number | null>(null);
   let previousFrameId = 0;
   let previousLineGeometry = $state<Record<string, TranslationLine>>({});
   let noTextStreak = $state(0);
@@ -171,9 +182,18 @@
     unlistenTranslation = await listen<TranslationPayload>("translation-update", (event) => {
       if (windowRole !== "overlay") return;
 
+      lastPipelineSignalAtMs = Date.now();
+
       const incomingFrameId = Number.isFinite(event.payload.frame_id) ? event.payload.frame_id : 0;
       if (incomingFrameId > 0 && incomingFrameId < previousFrameId) {
-        return;
+        // Backend frame IDs restart from 1 when the capture pipeline restarts.
+        // Treat near-zero IDs as a new stream and reset smoothing state.
+        if (incomingFrameId <= 2) {
+          previousFrameId = 0;
+          previousLineGeometry = {};
+        } else {
+          return;
+        }
       }
       previousFrameId = incomingFrameId;
 
@@ -191,6 +211,8 @@
 
     unlistenOcrStatus = await listen<OcrStatusPayload>("ocr-status", (event) => {
       if (windowRole !== "overlay") return;
+
+      lastPipelineSignalAtMs = Date.now();
 
       ocrStatusState = event.payload.state;
       ocrStatusMessage = event.payload.message;
@@ -222,6 +244,13 @@
           const suffix = event.payload.language_tag ? ` (effective OCR: ${event.payload.language_tag})` : "";
           ocrStatusMessage = `${event.payload.message}${suffix}`;
         }
+      } else if (event.payload.state === "ignored") {
+        noTextStreak = 0;
+        translatedLines = [];
+        translatedText = "";
+        sourceText = "";
+        previousLineGeometry = {};
+        ocrStatusMessage = "";
       } else if (event.payload.state === "error") {
         noTextStreak = Math.min(noTextStreak + 1, 99);
       }
@@ -253,8 +282,23 @@
         previousLineGeometry = {};
         noTextStreak = 0;
         ocrStatusLanguageTag = "";
+        lastPipelineSignalAtMs = null;
       }
     });
+
+    unlistenClickThrough = await listen<boolean>("click-through-changed", (event) => {
+      isClickThrough = !!event.payload;
+    });
+
+    if (windowRole === "overlay") {
+      pipelineWatchdogTimer = setInterval(() => {
+        if (mode !== "capture" || !isRunning || pipelineRestartInFlight) {
+          return;
+        }
+
+        void probePipelineStateAndRecover();
+      }, 1500);
+    }
   });
 
   onDestroy(() => {
@@ -262,8 +306,54 @@
     if (unlistenOcrStatus) unlistenOcrStatus();
     if (unlistenProgress) unlistenProgress();
     if (unlistenOverlayMode) unlistenOverlayMode();
+    if (unlistenClickThrough) unlistenClickThrough();
+    if (pipelineWatchdogTimer) clearInterval(pipelineWatchdogTimer);
     if (cleanupWindowListeners) cleanupWindowListeners();
   });
+
+  async function restartPipelineFromWatchdog() {
+    if (pipelineRestartInFlight || windowRole !== "overlay") return;
+
+    pipelineRestartInFlight = true;
+    ocrStatusState = "warning";
+    ocrStatusMessage = "Capture pipeline stalled, restarting...";
+
+    try {
+      await invoke("stop_translation");
+      previousFrameId = 0;
+      previousLineGeometry = {};
+      await invoke("start_translation", { languagePair: currentLanguage, ocrBackend: selectedOcrBackend });
+      lastPipelineSignalAtMs = Date.now();
+      isRunning = true;
+    } catch (e) {
+      ocrStatusState = "error";
+      ocrStatusMessage = "Failed to restart capture pipeline";
+      console.error("Watchdog restart failed:", e);
+    } finally {
+      pipelineRestartInFlight = false;
+    }
+  }
+
+  async function probePipelineStateAndRecover() {
+    if (pipelineRestartInFlight || windowRole !== "overlay" || mode !== "capture" || !isRunning) {
+      return;
+    }
+
+    try {
+      const state = await invoke<PipelineState>("get_pipeline_state");
+      if (!state.has_capture_region) {
+        ocrStatusState = "warning";
+        ocrStatusMessage = "Capture region missing, please re-capture";
+        return;
+      }
+
+      if (!state.running || !state.has_task || state.task_finished) {
+        await restartPipelineFromWatchdog();
+      }
+    } catch (e) {
+      console.error("Pipeline state probe failed:", e);
+    }
+  }
 
   function applyWindowRoleTheme() {
     document.documentElement.dataset.windowRole = windowRole;
@@ -517,6 +607,9 @@
       });
       await invoke("start_translation", { languagePair: currentLanguage, ocrBackend: selectedOcrBackend });
 
+      ocrStatusState = "warning";
+      ocrStatusMessage = "Initializing capture pipeline...";
+      lastPipelineSignalAtMs = Date.now();
       isRunning = true;
       lockedRect = rect;
       mode = "capture";
@@ -550,14 +643,50 @@
       isRunning = false;
     } else {
       await invoke("start_translation", { languagePair: currentLanguage, ocrBackend: selectedOcrBackend });
+      ocrStatusState = "warning";
+      ocrStatusMessage = "Initializing capture pipeline...";
+      lastPipelineSignalAtMs = Date.now();
       isRunning = true;
+    }
+  }
+
+  async function setClickThroughEnabled(enabled: boolean) {
+    const previous = isClickThrough;
+    isClickThrough = enabled;
+
+    try {
+      await invoke("set_click_through", { enabled });
+    } catch (e) {
+      isClickThrough = previous;
+      console.error("Failed to set click-through:", e);
+      alert("Failed to set click-through: " + e);
     }
   }
 
   async function toggleClickThrough() {
     if (windowRole !== "overlay") return;
-    isClickThrough = !isClickThrough;
-    await invoke("set_click_through", { enabled: isClickThrough });
+    await setClickThroughEnabled(!isClickThrough);
+  }
+
+  async function disableClickThroughFromControl() {
+    await setClickThroughEnabled(false);
+  }
+
+  async function unlockCaptureFromControl() {
+    if (windowRole !== "control") return;
+
+    try {
+      await invoke("stop_translation");
+      if (isClickThrough) {
+        await setClickThroughEnabled(false);
+      }
+      await invoke("unlock_capture");
+      isRunning = false;
+      lockedRect = null;
+    } catch (e) {
+      console.error("Failed to unlock capture from control:", e);
+      alert("Failed to unlock capture: " + e);
+    }
   }
 
   async function unlockCapture() {
@@ -570,8 +699,7 @@
 
     await invoke("unlock_capture");
     if (isClickThrough) {
-      isClickThrough = false;
-      await invoke("set_click_through", { enabled: false });
+      await setClickThroughEnabled(false);
     }
 
     translatedText = "";
@@ -584,6 +712,7 @@
     previousLineGeometry = {};
     noTextStreak = 0;
     ocrStatusLanguageTag = "";
+    lastPipelineSignalAtMs = null;
     mode = "capture";
     selecting = false;
     startPoint = null;
@@ -898,6 +1027,15 @@
           </button>
         </div>
 
+        <div class="actions">
+          <button onclick={disableClickThroughFromControl} disabled={!isClickThrough}>
+            Disable Click-through
+          </button>
+          <button onclick={unlockCaptureFromControl}>
+            Unlock Capture
+          </button>
+        </div>
+
         {#if isDownloading}
           <div class="progress-list">
             <div class="overall-progress">
@@ -963,7 +1101,7 @@
         </div>
       {/if}
 
-      {#if !translatedLines.length}
+      {#if !translatedLines.length && ocrStatusState !== "ignored"}
         <div class="capture-readout" style={getCaptureReadoutStyle(lockedRect)}>
           <div class="capture-placeholder">
             {#if isRunning}

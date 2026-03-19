@@ -80,7 +80,10 @@ pub fn is_backend_available(backend: OcrBackend) -> Result<bool, String> {
     }
 }
 
-pub fn is_language_supported_for_backend(backend: OcrBackend, language_pair: &str) -> Result<bool, String> {
+pub fn is_language_supported_for_backend(
+    backend: OcrBackend,
+    language_pair: &str,
+) -> Result<bool, String> {
     match backend {
         OcrBackend::Windows => is_language_supported(language_pair),
         OcrBackend::Auto => is_language_supported(language_pair),
@@ -136,7 +139,11 @@ pub fn recognize_text_with_backend(
 }
 
 #[cfg(windows)]
-fn windows_ocr(img: &RgbaImage, language_pair: &str, backend: OcrBackend) -> Result<OcrResult, String> {
+fn windows_ocr(
+    img: &RgbaImage,
+    language_pair: &str,
+    backend: OcrBackend,
+) -> Result<OcrResult, String> {
     use windows::core::HSTRING;
     use windows::Globalization::Language;
     use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
@@ -173,8 +180,9 @@ fn windows_ocr(img: &RgbaImage, language_pair: &str, backend: OcrBackend) -> Res
 
     let mut used_profile_fallback = false;
     let engine = match backend {
-        OcrBackend::Windows => OcrEngine::TryCreateFromLanguage(&lang)
-            .map_err(|e| format!("Failed to create explicit-language OcrEngine for {language_tag}: {e}"))?,
+        OcrBackend::Windows => OcrEngine::TryCreateFromLanguage(&lang).map_err(|e| {
+            format!("Failed to create explicit-language OcrEngine for {language_tag}: {e}")
+        })?,
         OcrBackend::WindowsProfile => OcrEngine::TryCreateFromUserProfileLanguages()
             .map_err(|e| format!("Failed to create profile-language OcrEngine: {e}"))?,
         OcrBackend::Auto => match OcrEngine::TryCreateFromLanguage(&lang) {
@@ -276,7 +284,10 @@ fn windows_ocr(img: &RgbaImage, language_pair: &str, backend: OcrBackend) -> Res
 }
 
 fn preprocess_for_ocr(img: &RgbaImage, language_pair: &str) -> (RgbaImage, f64) {
-    let cjk_mode = matches!(language_pair, "ja" | "ja-en" | "zh" | "zh-en" | "ko" | "ko-en");
+    let cjk_mode = matches!(
+        language_pair,
+        "ja" | "ja-en" | "zh" | "zh-en" | "ko" | "ko-en"
+    );
 
     let source = DynamicImage::ImageRgba8(img.clone());
     let mut scale = 1.0f64;
@@ -299,7 +310,11 @@ fn preprocess_for_ocr(img: &RgbaImage, language_pair: &str) -> (RgbaImage, f64) 
     if scale > 1.0 {
         let new_w = (img.width() as f64 * scale).round() as u32;
         let new_h = (img.height() as f64 * scale).round() as u32;
-        processed = processed.resize(new_w.max(1), new_h.max(1), image::imageops::FilterType::CatmullRom);
+        processed = processed.resize(
+            new_w.max(1),
+            new_h.max(1),
+            image::imageops::FilterType::CatmullRom,
+        );
     }
 
     (processed.to_rgba8(), scale)
@@ -307,13 +322,10 @@ fn preprocess_for_ocr(img: &RgbaImage, language_pair: &str) -> (RgbaImage, f64) 
 
 /// Creates an IBuffer from a byte slice using DataWriter.
 #[cfg(windows)]
-fn create_buffer(
-    data: &[u8],
-) -> Result<windows::Storage::Streams::IBuffer, String> {
+fn create_buffer(data: &[u8]) -> Result<windows::Storage::Streams::IBuffer, String> {
     use windows::Storage::Streams::DataWriter;
 
-    let writer = DataWriter::new()
-        .map_err(|e| format!("DataWriter::new failed: {e}"))?;
+    let writer = DataWriter::new().map_err(|e| format!("DataWriter::new failed: {e}"))?;
 
     writer
         .WriteBytes(data)

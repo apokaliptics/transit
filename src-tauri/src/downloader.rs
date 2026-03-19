@@ -51,11 +51,14 @@ pub async fn download_file(
     let emit_interval = 2; // Keep UI responsive without flooding IPC.
     let mut chunk_count = 0;
 
-    let _ = app.emit("download-progress", DownloadProgress {
-        file: filename.to_string(),
-        downloaded: 0,
-        total: total_size,
-    });
+    let _ = app.emit(
+        "download-progress",
+        DownloadProgress {
+            file: filename.to_string(),
+            downloaded: 0,
+            total: total_size,
+        },
+    );
 
     while let Some(chunk_res) = stream.next().await {
         let chunk = chunk_res.map_err(|e| format!("Chunk error: {e}"))?;
@@ -66,19 +69,25 @@ pub async fn download_file(
         chunk_count += 1;
 
         if chunk_count % emit_interval == 0 {
-            let _ = app.emit("download-progress", DownloadProgress {
-                file: filename.to_string(),
-                downloaded,
-                total: total_size,
-            });
+            let _ = app.emit(
+                "download-progress",
+                DownloadProgress {
+                    file: filename.to_string(),
+                    downloaded,
+                    total: total_size,
+                },
+            );
         }
     }
 
-    let _ = app.emit("download-progress", DownloadProgress {
-        file: filename.to_string(),
-        downloaded,
-        total: total_size,
-    });
+    let _ = app.emit(
+        "download-progress",
+        DownloadProgress {
+            file: filename.to_string(),
+            downloaded,
+            total: total_size,
+        },
+    );
 
     Ok(())
 }
@@ -86,14 +95,17 @@ pub async fn download_file(
 #[tauri::command]
 pub async fn download_models(app: AppHandle, language_pair: String) -> Result<String, String> {
     let model_dir = crate::models_root_dir(&app)?.join(&language_pair);
-    
+
     if !model_dir.exists() {
         std::fs::create_dir_all(&model_dir)
             .map_err(|e| format!("Failed to create model directory: {e}"))?;
     }
 
     let client = Client::new();
-    let base_url = format!("https://huggingface.co/onnx-community/opus-mt-{}/resolve/main", language_pair);
+    let base_url = format!(
+        "https://huggingface.co/onnx-community/opus-mt-{}/resolve/main",
+        language_pair
+    );
     let onnx_base_url = format!("{}/onnx", base_url);
 
     // 1. Download Tokenizer
@@ -102,8 +114,9 @@ pub async fn download_models(app: AppHandle, language_pair: String) -> Result<St
         &client,
         &format!("{base_url}/tokenizer.json"),
         "tokenizer.json",
-        &model_dir.join("tokenizer.json")
-    ).await?;
+        &model_dir.join("tokenizer.json"),
+    )
+    .await?;
 
     // 2. Download Encoder Model
     download_file(
@@ -111,8 +124,9 @@ pub async fn download_models(app: AppHandle, language_pair: String) -> Result<St
         &client,
         &format!("{onnx_base_url}/encoder_model.onnx"),
         "encoder_model.onnx",
-        &model_dir.join("encoder_model.onnx")
-    ).await?;
+        &model_dir.join("encoder_model.onnx"),
+    )
+    .await?;
 
     // 3. Download Decoder Model (plain first for stability, merged as fallback)
     let plain_decoder = download_file(
@@ -120,8 +134,9 @@ pub async fn download_models(app: AppHandle, language_pair: String) -> Result<St
         &client,
         &format!("{onnx_base_url}/decoder_model.onnx"),
         "decoder_model.onnx",
-        &model_dir.join("decoder_model.onnx")
-    ).await;
+        &model_dir.join("decoder_model.onnx"),
+    )
+    .await;
 
     if let Err(plain_err) = plain_decoder {
         log::warn!("Failed to download decoder_model.onnx, trying merged fallback: {plain_err}");
@@ -130,8 +145,9 @@ pub async fn download_models(app: AppHandle, language_pair: String) -> Result<St
             &client,
             &format!("{onnx_base_url}/decoder_model_merged.onnx"),
             "decoder_model_merged.onnx",
-            &model_dir.join("decoder_model_merged.onnx")
-        ).await?;
+            &model_dir.join("decoder_model_merged.onnx"),
+        )
+        .await?;
     }
 
     Ok(model_dir.to_string_lossy().to_string())
@@ -140,11 +156,11 @@ pub async fn download_models(app: AppHandle, language_pair: String) -> Result<St
 #[tauri::command]
 pub fn check_models(app: AppHandle, language_pair: String) -> Result<bool, String> {
     let model_dir = crate::models_root_dir(&app)?.join(&language_pair);
-    
+
     let has_tokenizer = model_dir.join("tokenizer.json").exists();
     let has_encoder = model_dir.join("encoder_model.onnx").exists();
-    let has_decoder = model_dir.join("decoder_model_merged.onnx").exists() || 
-                      model_dir.join("decoder_model.onnx").exists();
-                      
+    let has_decoder = model_dir.join("decoder_model_merged.onnx").exists()
+        || model_dir.join("decoder_model.onnx").exists();
+
     Ok(has_tokenizer && has_encoder && has_decoder)
 }

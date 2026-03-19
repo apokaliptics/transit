@@ -50,10 +50,42 @@ async fn start_translation(
         *selected_backend = backend;
     }
 
-    // If already running, do nothing.
-    if state.running.load(Ordering::Relaxed) {
-        return Ok("Already running".to_string());
+    {
+        let mut pipeline = state.pipeline_handle.lock().await;
+        if state.running.load(Ordering::Relaxed) {
+            let stale_running = match pipeline.as_ref() {
+                Some(handle) => handle.is_finished(),
+                None => true,
+            };
+
+            if !stale_running {
+                return Ok("Already running".to_string());
+            }
+
+            log::warn!("Pipeline marked running but task is stale; resetting state");
+            if let Some(handle) = pipeline.take() {
+                let _ = handle.await;
+            }
+            state.running.store(false, Ordering::Relaxed);
+        } else if pipeline
+            .as_ref()
+            .map(|handle| handle.is_finished())
+            .unwrap_or(false)
+        {
+            let _ = pipeline.take();
+        }
     }
+
+    let selected_language = state
+        .language_pair
+        .lock()
+        .map_err(|e| format!("Language pair lock error: {e}"))?
+        .clone();
+    let model_dir = models_root_dir(&app)?.join(&selected_language);
+    if !model_dir.exists() {
+        return Err(format!("Model files not found at {:?}", model_dir));
+    }
+    safe_init_engine(&model_dir)?;
 
     state.running.store(true, Ordering::Relaxed);
 
@@ -61,6 +93,22 @@ async fn start_translation(
     capture::reset_diff();
 
     let window = overlay_window(&app)?;
+    let _ = window.emit(
+        "ocr-status",
+        pipeline::OcrStatusPayload {
+            state: "warning".to_string(),
+            language_pair: selected_language.clone(),
+            message: "Capture pipeline starting...".to_string(),
+            backend: state
+                .ocr_backend
+                .lock()
+                .map(|value| value.clone())
+                .unwrap_or_else(|_| "auto".to_string()),
+            language_tag: "".to_string(),
+            used_profile_fallback: false,
+        },
+    );
+
     let running = state.running.clone();
     let capture_region = state.capture_region.clone();
     let language_pair = state.language_pair.clone();
@@ -68,7 +116,16 @@ async fn start_translation(
     let ocr_backend = state.ocr_backend.clone();
 
     let handle = tokio::spawn(async move {
-        pipeline::run_pipeline(window, running, capture_region, language_pair, capture_scale, ocr_backend).await;
+        pipeline::run_pipeline(
+            window,
+            running.clone(),
+            capture_region,
+            language_pair,
+            capture_scale,
+            ocr_backend,
+        )
+        .await;
+        running.store(false, Ordering::Relaxed);
     });
 
     let mut pipeline = state.pipeline_handle.lock().await;
@@ -92,10 +149,20 @@ async fn stop_translation(state: tauri::State<'_, AppState>) -> Result<String, S
 
 /// Set click-through mode on or off.
 #[tauri::command]
-async fn set_click_through(window: WebviewWindow, enabled: bool) -> Result<String, String> {
+async fn set_click_through(app: AppHandle, enabled: bool) -> Result<String, String> {
+    let window = overlay_window(&app)?;
     window
         .set_ignore_cursor_events(enabled)
         .map_err(|e| format!("set_ignore_cursor_events error: {e}"))?;
+
+    emit_click_through_state(&app, enabled);
+
+    if enabled {
+        if let Some(control_window) = app.get_webview_window("control") {
+            let _ = control_window.show();
+            let _ = control_window.set_focus();
+        }
+    }
 
     Ok(format!("Click-through set to {enabled}"))
 }
@@ -161,6 +228,7 @@ async fn begin_new_capture(
     window
         .set_ignore_cursor_events(false)
         .map_err(|e| format!("set_ignore_cursor_events error: {e}"))?;
+    emit_click_through_state(&app, false);
 
     window
         .set_position(Position::Physical(PhysicalPosition::new(
@@ -256,6 +324,8 @@ async fn cancel_new_capture(
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
     let window = overlay_window(&app)?;
+    let _ = window.set_ignore_cursor_events(false);
+    emit_click_through_state(&app, false);
     restore_window_bounds(&window, &state)?;
     window
         .hide()
@@ -270,6 +340,8 @@ async fn unlock_capture(
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
     let window = overlay_window(&app)?;
+    let _ = window.set_ignore_cursor_events(false);
+    emit_click_through_state(&app, false);
     {
         let mut region = state
             .capture_region
@@ -365,6 +437,14 @@ struct OcrDiagnostics {
     fallback_policy: String,
 }
 
+#[derive(serde::Serialize)]
+struct PipelineState {
+    running: bool,
+    has_task: bool,
+    task_finished: bool,
+    has_capture_region: bool,
+}
+
 #[tauri::command]
 fn get_ocr_diagnostics(language_pair: String, backend: String) -> Result<OcrDiagnostics, String> {
     let parsed = ocr::OcrBackend::from_str(&backend);
@@ -377,6 +457,34 @@ fn get_ocr_diagnostics(language_pair: String, backend: String) -> Result<OcrDiag
         language_pair,
         language_supported,
         fallback_policy: parsed.fallback_policy().to_string(),
+    })
+}
+
+#[tauri::command]
+async fn get_pipeline_state(state: tauri::State<'_, AppState>) -> Result<PipelineState, String> {
+    let running = state.running.load(Ordering::Relaxed);
+
+    let (has_task, task_finished) = {
+        let pipeline = state.pipeline_handle.lock().await;
+        let has_task = pipeline.is_some();
+        let task_finished = pipeline
+            .as_ref()
+            .map(|handle| handle.is_finished())
+            .unwrap_or(false);
+        (has_task, task_finished)
+    };
+
+    let has_capture_region = state
+        .capture_region
+        .lock()
+        .map_err(|e| format!("Capture region lock error: {e}"))?
+        .is_some();
+
+    Ok(PipelineState {
+        running,
+        has_task,
+        task_finished,
+        has_capture_region,
     })
 }
 
@@ -411,6 +519,7 @@ pub fn run() {
             set_ocr_backend,
             get_ocr_backend,
             get_ocr_diagnostics,
+            get_pipeline_state,
             init_engine,
         ])
         .setup(|app| {
@@ -427,6 +536,16 @@ pub fn run() {
 fn overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     app.get_webview_window("overlay")
         .ok_or_else(|| "Overlay window not found".to_string())
+}
+
+fn emit_click_through_state(app: &AppHandle, enabled: bool) {
+    if let Some(overlay) = app.get_webview_window("overlay") {
+        let _ = overlay.emit("click-through-changed", enabled);
+    }
+
+    if let Some(control) = app.get_webview_window("control") {
+        let _ = control.emit("click-through-changed", enabled);
+    }
 }
 
 pub(crate) fn models_root_dir(app: &AppHandle) -> Result<PathBuf, String> {
