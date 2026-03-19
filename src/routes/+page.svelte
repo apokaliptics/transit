@@ -5,8 +5,39 @@
   import { onDestroy, onMount } from "svelte";
 
   interface TranslationPayload {
+    frame_id: number;
     text: string;
     source_text: string;
+    lines: TranslationLine[];
+    capture_scale: number;
+    ocr_backend: string;
+  }
+
+  interface TranslationLine {
+    line_id: string;
+    source_text: string;
+    translated_text: string;
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  }
+
+  interface OcrStatusPayload {
+    state: string;
+    language_pair: string;
+    message: string;
+    backend: string;
+    language_tag: string;
+    used_profile_fallback: boolean;
+  }
+
+  interface OcrDiagnostics {
+    backend: string;
+    backend_available: boolean;
+    language_pair: string;
+    language_supported: boolean;
+    fallback_policy: string;
   }
 
   interface DownloadProgress {
@@ -27,21 +58,32 @@
   }
 
   type UiMode = "control" | "snip" | "capture";
-
   type WindowRole = "control" | "overlay";
 
+  const LANGUAGE_STORAGE_KEY = "transit.languagePair";
+  const OCR_BACKEND_STORAGE_KEY = "transit.ocrBackend";
   const languageOptions = [
     { label: "Japanese -> English", value: "ja-en" },
     { label: "Korean -> English", value: "ko-en" },
     { label: "Chinese (zh) -> English", value: "zh-en" },
   ];
+  const ocrBackendOptions = [
+    { label: "Auto", value: "auto" },
+    { label: "Windows OCR", value: "windows" },
+    { label: "Windows Profile OCR", value: "windows-profile" },
+  ];
 
-  let mode = $state<UiMode>("control");
   const windowRole: WindowRole = getCurrentWindow().label === "overlay" ? "overlay" : "control";
+  const expectedModelFiles = ["tokenizer.json", "encoder_model.onnx", "decoder_model_merged.onnx", "decoder_model.onnx"];
 
+  let mode = $state<UiMode>(windowRole === "overlay" ? "capture" : "control");
   let currentLanguage = $state("ja-en");
   let modelsChecked = $state(false);
   let modelsExist = $state(false);
+  let ocrSupportChecked = $state(false);
+  let ocrSupported = $state(false);
+  let ocrBackendSupported = $state(true);
+  let selectedOcrBackend = $state("auto");
   let isDownloading = $state(false);
   let downloadProgress = $state<Record<string, DownloadProgress>>({});
   let downloadStartedAtMs = $state<number | null>(null);
@@ -51,32 +93,138 @@
 
   let translatedText = $state("");
   let sourceText = $state("");
+  let translatedLines = $state<TranslationLine[]>([]);
+  let captureScale = $state(1);
+  let ocrStatusMessage = $state("");
+  let ocrStatusState = $state("idle");
+  let ocrStatusLanguageTag = $state("");
+  let runtimeOcrBackend = $state("auto");
+  let runtimeFallbackPolicy = $state("explicit-then-profile-fallback");
   let isRunning = $state(false);
   let isClickThrough = $state(false);
+  let lockedRect = $state<Rect | null>(null);
+  let viewportWidth = $state(0);
+  let viewportHeight = $state(0);
 
   let selecting = $state(false);
   let startPoint = $state<Point | null>(null);
   let selectionRect = $state<Rect | null>(null);
 
   let unlistenTranslation: (() => void) | null = null;
+  let unlistenOcrStatus: (() => void) | null = null;
   let unlistenProgress: (() => void) | null = null;
   let unlistenOverlayMode: (() => void) | null = null;
-
-  const expectedModelFiles = ["tokenizer.json", "encoder_model.onnx", "decoder_model_merged.onnx", "decoder_model.onnx"];
+  let cleanupWindowListeners: (() => void) | null = null;
+  let previousFrameId = 0;
+  let previousLineGeometry = $state<Record<string, TranslationLine>>({});
+  let noTextStreak = $state(0);
 
   onMount(async () => {
+    applyWindowRoleTheme();
+    syncLanguageFromStorage();
+    syncOcrBackendFromStorage();
+    syncViewport();
+    await refreshOcrBackend();
+    persistOcrBackendSelection();
     await refreshModelStatus();
 
-    if (windowRole === "overlay") {
-      mode = "capture";
-    } else {
-      mode = "control";
-    }
+    mode = windowRole === "overlay" ? "capture" : "control";
+
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === LANGUAGE_STORAGE_KEY && isValidLanguagePair(event.newValue)) {
+        if (event.newValue !== currentLanguage) {
+          currentLanguage = event.newValue;
+          downloadProgress = {};
+          void refreshModelStatus();
+        }
+      }
+
+      if (event.key === OCR_BACKEND_STORAGE_KEY && isValidOcrBackend(event.newValue)) {
+        if (event.newValue !== selectedOcrBackend) {
+          selectedOcrBackend = event.newValue;
+          void invoke("set_ocr_backend", { backend: selectedOcrBackend });
+          void refreshModelStatus();
+        }
+      }
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (windowRole !== "overlay" || mode !== "snip" || event.key !== "Escape") return;
+      event.preventDefault();
+      void cancelSnip();
+    };
+
+    const onResize = () => {
+      syncViewport();
+    };
+
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("resize", onResize);
+    cleanupWindowListeners = () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("resize", onResize);
+      clearWindowRoleTheme();
+    };
 
     unlistenTranslation = await listen<TranslationPayload>("translation-update", (event) => {
       if (windowRole !== "overlay") return;
+
+      const incomingFrameId = Number.isFinite(event.payload.frame_id) ? event.payload.frame_id : 0;
+      if (incomingFrameId > 0 && incomingFrameId < previousFrameId) {
+        return;
+      }
+      previousFrameId = incomingFrameId;
+
       translatedText = event.payload.text;
       sourceText = event.payload.source_text;
+      translatedLines = smoothLines(event.payload.lines ?? []);
+      captureScale = Number.isFinite(event.payload.capture_scale) && event.payload.capture_scale > 0
+        ? event.payload.capture_scale
+        : 1;
+      runtimeOcrBackend = event.payload.ocr_backend || selectedOcrBackend;
+      if (event.payload.ocr_backend === "windows-profile") {
+        runtimeFallbackPolicy = "profile-only";
+      }
+    });
+
+    unlistenOcrStatus = await listen<OcrStatusPayload>("ocr-status", (event) => {
+      if (windowRole !== "overlay") return;
+
+      ocrStatusState = event.payload.state;
+      ocrStatusMessage = event.payload.message;
+      ocrStatusLanguageTag = event.payload.language_tag || "";
+      runtimeOcrBackend = event.payload.backend || runtimeOcrBackend;
+      if (event.payload.used_profile_fallback) {
+        runtimeFallbackPolicy = "explicit-then-profile-fallback";
+      }
+
+      if (event.payload.state === "no-text") {
+        noTextStreak += 1;
+        const lang = event.payload.language_pair;
+        if (lang === "ja-en" || lang === "zh-en" || lang === "ko-en") {
+          ocrStatusMessage = `${event.payload.message}. If this is ${lang.split("-")[0]}, ensure the Windows OCR language is installed.`;
+        }
+
+        // Prevent stale overlays from lingering when OCR repeatedly sees no text.
+        if (noTextStreak >= 3) {
+          translatedLines = [];
+          translatedText = "";
+          sourceText = "";
+          previousLineGeometry = {};
+        }
+      } else if (event.payload.state === "ok") {
+        noTextStreak = 0;
+      } else if (event.payload.state === "warning") {
+        noTextStreak = 0;
+        if (event.payload.used_profile_fallback) {
+          const suffix = event.payload.language_tag ? ` (effective OCR: ${event.payload.language_tag})` : "";
+          ocrStatusMessage = `${event.payload.message}${suffix}`;
+        }
+      } else if (event.payload.state === "error") {
+        noTextStreak = Math.min(noTextStreak + 1, 99);
+      }
     });
 
     unlistenProgress = await listen<{
@@ -97,31 +245,142 @@
         selecting = false;
         startPoint = null;
         selectionRect = null;
+        lockedRect = null;
+        translatedText = "";
+        sourceText = "";
+        translatedLines = [];
+        previousFrameId = 0;
+        previousLineGeometry = {};
+        noTextStreak = 0;
+        ocrStatusLanguageTag = "";
       }
     });
   });
 
   onDestroy(() => {
     if (unlistenTranslation) unlistenTranslation();
+    if (unlistenOcrStatus) unlistenOcrStatus();
     if (unlistenProgress) unlistenProgress();
     if (unlistenOverlayMode) unlistenOverlayMode();
+    if (cleanupWindowListeners) cleanupWindowListeners();
   });
+
+  function applyWindowRoleTheme() {
+    document.documentElement.dataset.windowRole = windowRole;
+    document.body.dataset.windowRole = windowRole;
+  }
+
+  function syncViewport() {
+    viewportWidth = window.innerWidth;
+    viewportHeight = window.innerHeight;
+  }
+
+  function clearWindowRoleTheme() {
+    delete document.documentElement.dataset.windowRole;
+    delete document.body.dataset.windowRole;
+  }
+
+  function isValidLanguagePair(value: string | null): value is string {
+    return !!value && languageOptions.some((option) => option.value === value);
+  }
+
+  function syncLanguageFromStorage() {
+    try {
+      const stored = localStorage.getItem(LANGUAGE_STORAGE_KEY);
+      if (isValidLanguagePair(stored)) {
+        currentLanguage = stored;
+      } else {
+        persistLanguageSelection();
+      }
+    } catch (e) {
+      console.warn("Language storage unavailable:", e);
+    }
+  }
+
+  function persistLanguageSelection() {
+    try {
+      localStorage.setItem(LANGUAGE_STORAGE_KEY, currentLanguage);
+    } catch (e) {
+      console.warn("Language storage unavailable:", e);
+    }
+  }
+
+  function isValidOcrBackend(value: string | null): value is string {
+    return !!value && ocrBackendOptions.some((option) => option.value === value);
+  }
+
+  function syncOcrBackendFromStorage() {
+    try {
+      const stored = localStorage.getItem(OCR_BACKEND_STORAGE_KEY);
+      if (isValidOcrBackend(stored)) {
+        selectedOcrBackend = stored;
+      } else {
+        persistOcrBackendSelection();
+      }
+    } catch (e) {
+      console.warn("OCR backend storage unavailable:", e);
+    }
+  }
+
+  function persistOcrBackendSelection() {
+    try {
+      localStorage.setItem(OCR_BACKEND_STORAGE_KEY, selectedOcrBackend);
+    } catch (e) {
+      console.warn("OCR backend storage unavailable:", e);
+    }
+  }
+
+  async function refreshOcrBackend() {
+    try {
+      const backend = await invoke<string>("get_ocr_backend");
+      selectedOcrBackend = backend || "auto";
+    } catch {
+      selectedOcrBackend = "auto";
+    }
+  }
 
   async function refreshModelStatus() {
     modelsChecked = false;
+    ocrSupportChecked = false;
     try {
       modelsExist = await invoke<boolean>("check_models", { languagePair: currentLanguage });
+      const diagnostics = await invoke<OcrDiagnostics>("get_ocr_diagnostics", {
+        languagePair: currentLanguage,
+        backend: selectedOcrBackend,
+      });
+
+      selectedOcrBackend = diagnostics.backend || selectedOcrBackend;
+      ocrSupported = diagnostics.language_supported;
+      ocrBackendSupported = diagnostics.backend_available;
+      runtimeFallbackPolicy = diagnostics.fallback_policy || runtimeFallbackPolicy;
     } catch (e) {
       console.error("Model check failed:", e);
       modelsExist = false;
+      ocrSupported = false;
+      ocrBackendSupported = false;
     } finally {
       modelsChecked = true;
+      ocrSupportChecked = true;
     }
+  }
+
+  async function onOcrBackendChange(event: Event) {
+    const select = event.currentTarget as HTMLSelectElement;
+    selectedOcrBackend = select.value;
+    persistOcrBackendSelection();
+    try {
+      await invoke("set_ocr_backend", { backend: selectedOcrBackend });
+    } catch (e) {
+      console.error("Failed to set OCR backend:", e);
+      alert("Failed to set OCR backend: " + e);
+    }
+    await refreshModelStatus();
   }
 
   async function onLanguageChange(event: Event) {
     const select = event.currentTarget as HTMLSelectElement;
     currentLanguage = select.value;
+    persistLanguageSelection();
     downloadProgress = {};
     await refreshModelStatus();
   }
@@ -135,6 +394,7 @@
   }
 
   async function installLanguage(force: boolean) {
+    persistLanguageSelection();
     isDownloading = true;
     downloadProgress = {};
     downloadStartedAtMs = Date.now();
@@ -160,8 +420,21 @@
   async function startCapture() {
     if (windowRole !== "control" && windowRole !== "overlay") return;
 
+    syncLanguageFromStorage();
+    await refreshModelStatus();
+
     if (!modelsExist || isDownloading) {
       alert("Install the selected language model first.");
+      return;
+    }
+
+    if (!ocrSupported) {
+      alert("Windows OCR language support is missing for the selected language. Install the matching Windows language OCR pack first.");
+      return;
+    }
+
+    if (!ocrBackendSupported) {
+      alert("The selected OCR backend is not available on this system.");
       return;
     }
 
@@ -175,6 +448,21 @@
         isClickThrough = false;
         await invoke("set_click_through", { enabled: false });
       }
+
+      translatedText = "";
+      sourceText = "";
+      translatedLines = [];
+      captureScale = 1;
+      ocrStatusMessage = "";
+      ocrStatusState = "idle";
+      previousFrameId = 0;
+      previousLineGeometry = {};
+      noTextStreak = 0;
+      ocrStatusLanguageTag = "";
+      lockedRect = null;
+      selecting = false;
+      startPoint = null;
+      selectionRect = null;
 
       await invoke("begin_new_capture");
     } catch (e) {
@@ -193,6 +481,10 @@
 
   function onSnipPointerDown(event: PointerEvent) {
     if (mode !== "snip") return;
+
+    const target = event.target as HTMLElement | null;
+    if (target?.closest("button")) return;
+
     const point = { x: event.clientX, y: event.clientY };
     startPoint = point;
     selectionRect = { left: point.x, top: point.y, width: 0, height: 0 };
@@ -221,10 +513,12 @@
         y: Math.round(rect.top),
         width: Math.round(rect.width),
         height: Math.round(rect.height),
+        scaleFactor: window.devicePixelRatio || 1,
       });
-      await invoke("start_translation");
+      await invoke("start_translation", { languagePair: currentLanguage, ocrBackend: selectedOcrBackend });
 
       isRunning = true;
+      lockedRect = rect;
       mode = "capture";
       startPoint = null;
       selectionRect = null;
@@ -235,11 +529,18 @@
   }
 
   async function cancelSnip() {
-    await invoke("cancel_new_capture");
-    mode = "capture";
-    selecting = false;
-    startPoint = null;
-    selectionRect = null;
+    try {
+      await invoke("cancel_new_capture");
+    } catch (e) {
+      console.error("Failed to cancel capture:", e);
+      alert("Failed to cancel capture: " + e);
+    } finally {
+      mode = "capture";
+      selecting = false;
+      startPoint = null;
+      selectionRect = null;
+      lockedRect = null;
+    }
   }
 
   async function toggleCapturePause() {
@@ -248,7 +549,7 @@
       await invoke("stop_translation");
       isRunning = false;
     } else {
-      await invoke("start_translation");
+      await invoke("start_translation", { languagePair: currentLanguage, ocrBackend: selectedOcrBackend });
       isRunning = true;
     }
   }
@@ -275,7 +576,19 @@
 
     translatedText = "";
     sourceText = "";
+    translatedLines = [];
+    captureScale = 1;
+    ocrStatusMessage = "";
+    ocrStatusState = "idle";
+    previousFrameId = 0;
+    previousLineGeometry = {};
+    noTextStreak = 0;
+    ocrStatusLanguageTag = "";
     mode = "capture";
+    selecting = false;
+    startPoint = null;
+    selectionRect = null;
+    lockedRect = null;
   }
 
   function getDownloadTotals(): { downloaded: number; total: number } {
@@ -357,9 +670,175 @@
     if (mins > 0) return `Elapsed ${mins}m ${secs}s`;
     return `Elapsed ${secs}s`;
   }
+
+  function getSelectionStyle(rect: Rect): string {
+    return `left: ${rect.left}px; top: ${rect.top}px; width: ${rect.width}px; height: ${rect.height}px;`;
+  }
+
+  function clamp(value: number, min: number, max: number): number {
+    return Math.min(Math.max(value, min), max);
+  }
+
+  function getCaptureFrameStyle(rect: Rect | null): string {
+    if (!rect) return "display: none;";
+    return getSelectionStyle(rect);
+  }
+
+  function getCaptureReadoutStyle(rect: Rect | null): string {
+    if (!rect) {
+      return "left: 12px; right: 12px; bottom: 12px;";
+    }
+
+    const maxWidth = Math.max(220, viewportWidth - 24);
+    const width = Math.min(Math.max(rect.width, 260), Math.min(560, maxWidth));
+    const left = clamp(rect.left, 12, Math.max(12, viewportWidth - width - 12));
+    const estimatedHeight = sourceText ? 170 : translatedText ? 118 : 72;
+    const spaceBelow = viewportHeight - (rect.top + rect.height) - 12;
+    const spaceAbove = rect.top - 12;
+
+    let top = rect.top + rect.height + 12;
+    if (spaceBelow < estimatedHeight && spaceAbove >= estimatedHeight) {
+      top = rect.top - estimatedHeight - 12;
+    } else if (spaceBelow < estimatedHeight && spaceAbove < estimatedHeight) {
+      top = clamp(viewportHeight - estimatedHeight - 12, 12, Math.max(12, viewportHeight - estimatedHeight - 12));
+    }
+
+    return `left: ${left}px; top: ${top}px; width: ${width}px;`;
+  }
+
+  function getInPlaceLayerStyle(rect: Rect | null): string {
+    if (!rect) return "display: none;";
+    return getSelectionStyle(rect);
+  }
+
+  function getLineOverlayStyle(line: TranslationLine): string {
+    const dpr = captureScale > 0 ? captureScale : window.devicePixelRatio || 1;
+    const left = Math.max(0, line.left / dpr);
+    const top = Math.max(0, line.top / dpr);
+    const width = Math.max(8, line.width / dpr);
+    const height = Math.max(16, line.height / dpr);
+
+    const text = (line.translated_text || "").trim();
+    const glyphCount = Math.max(1, Array.from(text).length);
+    const looksCjk = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(text);
+
+    const computeFont = (w: number, h: number): number => {
+      const area = Math.max(1, w * h);
+      const areaBased = Math.sqrt(area / (glyphCount * (looksCjk ? 1.3 : 1.8)));
+      const heightCap = h * (looksCjk ? 0.78 : 0.72);
+      return Math.max(11, Math.min(38, Math.min(areaBased, heightCap)));
+    };
+
+    if (lockedRect) {
+      const maxW = Math.max(8, lockedRect.width - left);
+      const maxH = Math.max(16, lockedRect.height - top);
+      const boundedW = Math.max(8, Math.min(width, maxW));
+      const boundedH = Math.max(16, Math.min(height, maxH));
+      const fontSize = computeFont(boundedW, boundedH);
+      const padY = Math.max(1, Math.round(boundedH * 0.08));
+      const padX = Math.max(2, Math.round(boundedH * 0.15));
+      const letterSpacing = looksCjk ? 0 : 0.2;
+      return `left:${left}px;top:${top}px;width:${boundedW}px;height:${boundedH}px;font-size:${fontSize}px;padding:${padY}px ${padX}px;letter-spacing:${letterSpacing}px;`;
+    }
+
+    const fontSize = computeFont(width, height);
+    const padY = Math.max(1, Math.round(height * 0.08));
+    const padX = Math.max(2, Math.round(height * 0.15));
+    const letterSpacing = looksCjk ? 0 : 0.2;
+    return `left:${left}px;top:${top}px;width:${width}px;height:${height}px;font-size:${fontSize}px;padding:${padY}px ${padX}px;letter-spacing:${letterSpacing}px;`;
+  }
+
+  function computeIou(a: TranslationLine, b: TranslationLine): number {
+    const ax1 = a.left;
+    const ay1 = a.top;
+    const ax2 = a.left + a.width;
+    const ay2 = a.top + a.height;
+
+    const bx1 = b.left;
+    const by1 = b.top;
+    const bx2 = b.left + b.width;
+    const by2 = b.top + b.height;
+
+    const ix1 = Math.max(ax1, bx1);
+    const iy1 = Math.max(ay1, by1);
+    const ix2 = Math.min(ax2, bx2);
+    const iy2 = Math.min(ay2, by2);
+
+    if (ix2 <= ix1 || iy2 <= iy1) return 0;
+
+    const inter = (ix2 - ix1) * (iy2 - iy1);
+    const aArea = Math.max(1, (ax2 - ax1) * (ay2 - ay1));
+    const bArea = Math.max(1, (bx2 - bx1) * (by2 - by1));
+    const union = aArea + bArea - inter;
+
+    return union > 0 ? inter / union : 0;
+  }
+
+  function smoothLines(lines: TranslationLine[]): TranslationLine[] {
+    const alpha = 0.5;
+    const nextGeometry: Record<string, TranslationLine> = {};
+    const consumedPrevIds: Record<string, boolean> = {};
+
+    const smoothed = lines.map((line) => {
+      const defaultId = line.line_id || `${line.left}:${line.top}:${line.source_text}`;
+
+      let stableId = defaultId;
+      let prev = previousLineGeometry[stableId];
+
+      if (!prev) {
+        let bestId = "";
+        let bestScore = 0;
+        for (const [candidateId, candidate] of Object.entries(previousLineGeometry)) {
+          if (consumedPrevIds[candidateId]) continue;
+          const iou = computeIou(line, candidate);
+          if (iou > bestScore) {
+            bestScore = iou;
+            bestId = candidateId;
+          }
+        }
+
+        if (bestId && bestScore >= 0.35) {
+          stableId = bestId;
+          prev = previousLineGeometry[bestId];
+        }
+      }
+
+      const merged: TranslationLine = prev
+        ? {
+            ...line,
+            line_id: stableId,
+            left: Math.round(prev.left * (1 - alpha) + line.left * alpha),
+            top: Math.round(prev.top * (1 - alpha) + line.top * alpha),
+            width: Math.round(prev.width * (1 - alpha) + line.width * alpha),
+            height: Math.round(prev.height * (1 - alpha) + line.height * alpha),
+          }
+        : { ...line, line_id: stableId };
+
+      nextGeometry[stableId] = merged;
+      consumedPrevIds[stableId] = true;
+      return merged;
+    });
+
+    previousLineGeometry = nextGeometry;
+    return smoothed;
+  }
+
+  function formatSelectionSize(rect: Rect | null): string {
+    if (!rect) return "";
+    return `${Math.round(rect.width)} x ${Math.round(rect.height)}`;
+  }
+
+  function stopEvent(event: Event) {
+    event.stopPropagation();
+  }
 </script>
 
-<main class="surface" role="application">
+<main
+  class="surface"
+  class:control-surface={windowRole === "control"}
+  class:overlay-surface={windowRole === "overlay"}
+  role="application"
+>
   {#if windowRole === "control"}
     <section class="control-module" data-tauri-drag-region>
       <header class="module-head" data-tauri-drag-region>
@@ -375,10 +854,37 @@
           {/each}
         </select>
 
+        <label for="ocr-backend">OCR Backend</label>
+        <select id="ocr-backend" value={selectedOcrBackend} onchange={onOcrBackendChange}>
+          {#each ocrBackendOptions as option (option.value)}
+            <option value={option.value}>{option.label}</option>
+          {/each}
+        </select>
+
         <div class="status-row">
           <span class="dot" class:ok={modelsExist}></span>
           <span>{modelsChecked ? (modelsExist ? "Model installed" : "Model not installed") : "Checking model..."}</span>
         </div>
+
+        <div class="status-row">
+          <span class="dot" class:ok={ocrSupported}></span>
+          <span>
+            {ocrSupportChecked
+              ? (ocrSupported ? "OCR language ready" : "OCR language missing in Windows")
+              : "Checking OCR support..."}
+          </span>
+        </div>
+
+        <div class="status-row">
+          <span class="dot" class:ok={ocrBackendSupported}></span>
+          <span>{ocrBackendSupported ? `OCR backend ready (${selectedOcrBackend})` : `OCR backend unavailable (${selectedOcrBackend})`}</span>
+        </div>
+
+        {#if ocrSupportChecked && !ocrSupported}
+          <div class="ocr-warning">
+            Install Windows OCR support for {currentLanguage.split("-")[0]} before capture.
+          </div>
+        {/if}
 
         <div class="actions">
           <button onclick={installSelectedLanguage} disabled={isDownloading}>
@@ -387,7 +893,7 @@
           <button onclick={reinstallSelectedLanguage} disabled={isDownloading}>
             Reinstall
           </button>
-          <button class="primary" onclick={startCapture} disabled={!modelsExist || isDownloading}>
+          <button class="primary" onclick={startCapture} disabled={!modelsExist || isDownloading || !ocrSupported || !ocrBackendSupported}>
             Capture
           </button>
         </div>
@@ -433,19 +939,42 @@
 
   {#if windowRole === "overlay" && mode === "capture"}
     <section class="capture-layer">
+      {#if lockedRect}
+        <div class="capture-frame" style={getCaptureFrameStyle(lockedRect)}></div>
+      {/if}
+
       <div class="capture-toolbar">
+        <span class="capture-status" class:paused={!isRunning}>{isRunning ? "Live" : "Paused"}</span>
+        <span class="capture-backend">OCR: {runtimeOcrBackend}</span>
+        <span class="capture-backend policy">{runtimeFallbackPolicy}</span>
         <button onclick={toggleCapturePause}>{isRunning ? "Pause" : "Resume"}</button>
         <button onclick={toggleClickThrough}>{isClickThrough ? "Unlock UI" : "Click-through"}</button>
         <button onclick={startCapture}>Re-capture</button>
         <button class="danger" onclick={unlockCapture}>Unlock</button>
       </div>
 
-      {#if translatedText}
-        <div class="translation-in-place">{translatedText}</div>
+      {#if lockedRect}
+        <div class="in-place-layer" style={getInPlaceLayerStyle(lockedRect)}>
+          {#each translatedLines as line, idx (`${line.line_id}:${idx}`)}
+            {#if line.translated_text?.trim()}
+              <div class="in-place-line" style={getLineOverlayStyle(line)}>{line.translated_text}</div>
+            {/if}
+          {/each}
+        </div>
       {/if}
 
-      {#if sourceText}
-        <div class="source-preview">{sourceText}</div>
+      {#if !translatedLines.length}
+        <div class="capture-readout" style={getCaptureReadoutStyle(lockedRect)}>
+          <div class="capture-placeholder">
+            {#if isRunning}
+              <span class:warn={ocrStatusState === "warning"} class:error={ocrStatusState === "error"}>
+                {ocrStatusState === "error" ? ocrStatusMessage : (ocrStatusMessage || "Watching selected region for text...")}
+              </span>
+            {:else}
+              Translation paused.
+            {/if}
+          </div>
+        </div>
       {/if}
     </section>
   {/if}
@@ -459,15 +988,25 @@
       onpointerup={onSnipPointerUp}
     >
       <div class="snip-hint">
-        Drag to select text area
-        <button onclick={cancelSnip}>Cancel</button>
+        <span>Drag a live translation area</span>
+        {#if selectionRect}
+          <span class="snip-size">{formatSelectionSize(selectionRect)}</span>
+        {/if}
+        <button
+          onpointerdown={stopEvent}
+          onclick={async (event) => {
+            stopEvent(event);
+            await cancelSnip();
+          }}
+        >
+          Cancel
+        </button>
       </div>
 
       {#if selectionRect}
-        <div
-          class="snip-rect"
-          style="left: {selectionRect.left}px; top: {selectionRect.top}px; width: {selectionRect.width}px; height: {selectionRect.height}px;"
-        ></div>
+        <div class="snip-rect" style={getSelectionStyle(selectionRect)}>
+          <div class="snip-size-badge">{formatSelectionSize(selectionRect)}</div>
+        </div>
       {/if}
     </div>
   {/if}
@@ -488,14 +1027,26 @@
     font-family: "Segoe UI", system-ui, sans-serif;
   }
 
+  :global(html[data-window-role="overlay"]),
+  :global(body[data-window-role="overlay"]) {
+    background: transparent;
+  }
+
   .surface {
     position: fixed;
     inset: 0;
     user-select: none;
+  }
+
+  .control-surface {
     background:
       radial-gradient(circle at 15% 15%, rgba(51, 132, 255, 0.16), transparent 42%),
       radial-gradient(circle at 80% 20%, rgba(25, 182, 255, 0.1), transparent 34%),
       linear-gradient(165deg, #0d1119, #0b1220);
+  }
+
+  .overlay-surface {
+    background: transparent;
   }
 
   .control-module {
@@ -674,28 +1225,117 @@
   .capture-layer {
     position: fixed;
     inset: 0;
+    background: transparent;
+  }
+
+  .capture-frame {
+    position: fixed;
+    border-radius: 18px;
+    border: 2px solid rgba(117, 216, 255, 0.9);
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.25) inset,
+      0 18px 40px rgba(0, 0, 0, 0.22);
     pointer-events: none;
+  }
+
+  .in-place-layer {
+    position: fixed;
+    border-radius: 14px;
+    pointer-events: none;
+    overflow: hidden;
+  }
+
+  .in-place-line {
+    position: absolute;
+    display: block;
+    line-height: 1.16;
+    font-weight: 700;
+    color: #111822;
+    background: rgba(245, 249, 255, 0.94);
+    border-radius: 6px;
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.48), 0 0 0 1px rgba(120, 138, 168, 0.22);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    text-overflow: ellipsis;
+    overflow: hidden;
+    transition:
+      left 120ms linear,
+      top 120ms linear,
+      width 120ms linear,
+      height 120ms linear,
+      font-size 120ms linear;
+  }
+
+  .ocr-warning {
+    border-radius: 10px;
+    padding: 8px 10px;
+    border: 1px solid rgba(255, 181, 111, 0.45);
+    background: rgba(255, 181, 111, 0.12);
+    color: #ffd8a8;
+    font-size: 11px;
+    line-height: 1.35;
   }
 
   .capture-toolbar {
     position: fixed;
-    top: 6px;
-    right: 6px;
+    top: 10px;
+    right: 10px;
     display: flex;
+    align-items: center;
     gap: 6px;
     padding: 6px;
-    border-radius: 10px;
-    background: rgba(12, 14, 20, 0.72);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    backdrop-filter: blur(8px);
-    pointer-events: auto;
+    border-radius: 999px;
+    background: rgba(7, 12, 22, 0.64);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    backdrop-filter: blur(10px);
+  }
+
+  .capture-status {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 54px;
+    height: 28px;
+    padding: 0 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #052034;
+    background: #7be0ff;
+  }
+
+  .capture-status.paused {
+    color: #ffe8b8;
+    background: rgba(245, 158, 11, 0.28);
+  }
+
+  .capture-backend {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 28px;
+    padding: 0 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #cfe9ff;
+    background: rgba(49, 84, 130, 0.34);
+  }
+
+  .capture-backend.policy {
+    color: #d8f6dc;
+    background: rgba(42, 108, 62, 0.32);
   }
 
   .capture-toolbar button {
     height: 28px;
-    border-radius: 8px;
-    padding: 0 10px;
+    border-radius: 999px;
+    padding: 0 11px;
     font-size: 12px;
+    background: rgba(255, 255, 255, 0.11);
   }
 
   .capture-toolbar .danger {
@@ -703,43 +1343,54 @@
     color: #ffd8d8;
   }
 
-  .translation-in-place {
-    position: absolute;
-    left: 8px;
-    right: 8px;
-    bottom: 10px;
-    font-size: clamp(20px, 3.8vw, 38px);
-    font-weight: 700;
-    line-height: 1.16;
-    color: #f7fdff;
-    text-shadow:
-      -1px -1px 0 #000,
-      1px -1px 0 #000,
-      -1px 1px 0 #000,
-      1px 1px 0 #000,
-      0 0 11px rgba(0, 0, 0, 0.85);
+  .capture-readout {
+    position: fixed;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
     pointer-events: none;
+    z-index: 1;
   }
 
-  .source-preview {
-    position: absolute;
-    left: 8px;
-    right: 8px;
-    top: 44px;
+  .capture-placeholder {
+    border-radius: 18px;
+    padding: 12px 14px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(5, 10, 19, 0.6);
+    backdrop-filter: blur(12px);
+    color: #ecf6ff;
+  }
+
+  .capture-placeholder {
     font-size: 12px;
-    color: rgba(233, 243, 255, 0.88);
-    background: rgba(4, 6, 12, 0.5);
-    border-radius: 8px;
-    padding: 6px 8px;
-    opacity: 0.85;
-    pointer-events: none;
+    color: rgba(236, 246, 255, 0.86);
+  }
+
+  .capture-placeholder .warn {
+    color: #ffd9a6;
+  }
+
+  .capture-placeholder .error {
+    color: #ffc7c7;
   }
 
   .snip-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.22);
+    background: rgba(5, 10, 18, 0.05);
     cursor: crosshair;
+  }
+
+  .snip-overlay::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(123, 224, 255, 0.06) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(123, 224, 255, 0.06) 1px, transparent 1px);
+    background-size: 28px 28px;
+    opacity: 0.35;
+    pointer-events: none;
   }
 
   .snip-hint {
@@ -751,15 +1402,31 @@
     align-items: center;
     gap: 10px;
     border-radius: 999px;
-    padding: 8px 12px;
+    padding: 9px 14px;
     font-size: 12px;
-    background: rgba(10, 12, 20, 0.82);
+    background: rgba(7, 12, 22, 0.78);
     color: #f8fbff;
-    border: 1px solid rgba(255, 255, 255, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    backdrop-filter: blur(10px);
+  }
+
+  .snip-size,
+  .snip-size-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 24px;
+    padding: 0 9px;
+    border-radius: 999px;
+    background: rgba(123, 224, 255, 0.16);
+    color: #dff7ff;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
   }
 
   .snip-hint button {
-    height: 24px;
+    height: 26px;
     border-radius: 999px;
     padding: 0 10px;
     font-size: 11px;
@@ -767,8 +1434,20 @@
 
   .snip-rect {
     position: fixed;
-    border: 2px solid #1ab6ff;
-    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.4);
-    background: rgba(26, 182, 255, 0.1);
+    border-radius: 18px;
+    border: 2px solid #7be0ff;
+    background: rgba(255, 255, 255, 0.02);
+    box-shadow:
+      0 0 0 9999px rgba(5, 10, 18, 0.3),
+      0 0 0 1px rgba(255, 255, 255, 0.24) inset,
+      0 28px 54px rgba(0, 0, 0, 0.28);
+  }
+
+  .snip-size-badge {
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
+    background: rgba(7, 12, 22, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.14);
   }
 </style>

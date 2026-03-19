@@ -1,5 +1,6 @@
 use ort::session::Session;
 use ort::value::Value;
+use serde::Deserialize;
 use std::fs;
 use std::path::Path;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -12,9 +13,28 @@ struct TranslationEngine {
     encoder: Mutex<Session>,
     decoder: Mutex<Session>,
     tokenizer: Tokenizer,
+    decoder_start_token_id: i64,
+    eos_token_id: i64,
+    max_length: usize,
 }
 
 static ENGINE: OnceLock<RwLock<Option<Arc<TranslationEngine>>>> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy)]
+struct GenerationSettings {
+    decoder_start_token_id: i64,
+    eos_token_id: i64,
+    max_length: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct GenerationConfig {
+    decoder_start_token_id: Option<i64>,
+    eos_token_id: Option<i64>,
+    forced_eos_token_id: Option<i64>,
+    pad_token_id: Option<i64>,
+    max_length: Option<usize>,
+}
 
 fn engine_slot() -> &'static RwLock<Option<Arc<TranslationEngine>>> {
     ENGINE.get_or_init(|| RwLock::new(None))
@@ -198,6 +218,52 @@ fn load_tokenizer(tokenizer_path: &Path) -> Result<Tokenizer, String> {
     }
 }
 
+fn token_id(tokenizer: &Tokenizer, token: &str) -> Option<i64> {
+    tokenizer.token_to_id(token).map(|id| id as i64)
+}
+
+fn fallback_generation_settings(tokenizer: &Tokenizer) -> Result<GenerationSettings, String> {
+    let eos_token_id = token_id(tokenizer, "</s>")
+        .or_else(|| token_id(tokenizer, "<eos>"))
+        .ok_or_else(|| "Could not resolve EOS token id from tokenizer".to_string())?;
+
+    let decoder_start_token_id = token_id(tokenizer, "<pad>")
+        .or_else(|| token_id(tokenizer, "<s>"))
+        .unwrap_or(eos_token_id);
+
+    Ok(GenerationSettings {
+        decoder_start_token_id,
+        eos_token_id,
+        max_length: 512,
+    })
+}
+
+fn load_generation_settings(model_dir: &Path, tokenizer: &Tokenizer) -> Result<GenerationSettings, String> {
+    let fallback = fallback_generation_settings(tokenizer)?;
+    let generation_config_path = model_dir.join("generation_config.json");
+
+    if !generation_config_path.exists() {
+        return Ok(fallback);
+    }
+
+    let raw = fs::read_to_string(&generation_config_path)
+        .map_err(|e| format!("Failed to read generation_config.json: {e}"))?;
+    let config: GenerationConfig = serde_json::from_str(&raw)
+        .map_err(|e| format!("Failed to parse generation_config.json: {e}"))?;
+
+    Ok(GenerationSettings {
+        decoder_start_token_id: config
+            .decoder_start_token_id
+            .or(config.pad_token_id)
+            .unwrap_or(fallback.decoder_start_token_id),
+        eos_token_id: config
+            .eos_token_id
+            .or(config.forced_eos_token_id)
+            .unwrap_or(fallback.eos_token_id),
+        max_length: config.max_length.unwrap_or(fallback.max_length),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,11 +353,22 @@ pub fn init(model_dir: &Path) -> Result<(), String> {
     };
 
     let tokenizer = load_tokenizer(&tokenizer_path)?;
+    let generation = load_generation_settings(model_dir, &tokenizer)?;
+
+    log::info!(
+        "Generation settings resolved: decoder_start_token_id={}, eos_token_id={}, max_length={}",
+        generation.decoder_start_token_id,
+        generation.eos_token_id,
+        generation.max_length
+    );
 
     let engine = Arc::new(TranslationEngine {
         encoder: Mutex::new(encoder),
         decoder: Mutex::new(decoder),
         tokenizer,
+        decoder_start_token_id: generation.decoder_start_token_id,
+        eos_token_id: generation.eos_token_id,
+        max_length: generation.max_length,
     });
 
     let mut slot = engine_slot()
@@ -359,17 +436,9 @@ pub fn translate(text: &str) -> Result<String, String> {
         .map_err(|e| format!("Encoder run error: {e}"))?;
 
     // Autoregressive decoding
-    let pad_token_id = engine
-        .tokenizer
-        .token_to_id("</s>")
-        .unwrap_or(0) as i64;
+    let mut decoder_input_ids: Vec<i64> = vec![engine.decoder_start_token_id];
 
-    let eos_token_id = pad_token_id;
-
-    let max_length = 512;
-    let mut decoder_input_ids: Vec<i64> = vec![pad_token_id];
-
-    for _ in 0..max_length {
+    for _ in 0..engine.max_length {
         let dec_len = decoder_input_ids.len();
 
         let decoder_input_value = Value::from_array(
@@ -428,7 +497,7 @@ pub fn translate(text: &str) -> Result<String, String> {
             best_id
         }; // decoder_session and decoder_outputs dropped here
 
-        if best_id == eos_token_id {
+        if best_id == engine.eos_token_id {
             break;
         }
 

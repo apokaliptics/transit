@@ -4,11 +4,13 @@ mod ocr;
 mod pipeline;
 mod translate;
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Size, WebviewWindow};
+use tauri::{
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Size, WebviewWindow,
+};
 use tokio::sync::Mutex;
 use xcap::Monitor;
 
@@ -19,6 +21,9 @@ struct AppState {
     capture_region: Arc<StdMutex<Option<pipeline::CaptureRegion>>>,
     snip_restore_bounds: Arc<StdMutex<Option<pipeline::CaptureRegion>>>,
     control_bounds: Arc<StdMutex<Option<pipeline::CaptureRegion>>>,
+    language_pair: Arc<StdMutex<String>>,
+    capture_scale: Arc<StdMutex<f64>>,
+    ocr_backend: Arc<StdMutex<String>>,
 }
 
 /// Start the translation pipeline.
@@ -26,7 +31,25 @@ struct AppState {
 async fn start_translation(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
+    language_pair: Option<String>,
+    ocr_backend: Option<String>,
 ) -> Result<String, String> {
+    if let Some(pair) = language_pair {
+        let mut selected = state
+            .language_pair
+            .lock()
+            .map_err(|e| format!("Language pair lock error: {e}"))?;
+        *selected = pair;
+    }
+
+    if let Some(backend) = ocr_backend {
+        let mut selected_backend = state
+            .ocr_backend
+            .lock()
+            .map_err(|e| format!("OCR backend lock error: {e}"))?;
+        *selected_backend = backend;
+    }
+
     // If already running, do nothing.
     if state.running.load(Ordering::Relaxed) {
         return Ok("Already running".to_string());
@@ -40,9 +63,12 @@ async fn start_translation(
     let window = overlay_window(&app)?;
     let running = state.running.clone();
     let capture_region = state.capture_region.clone();
+    let language_pair = state.language_pair.clone();
+    let capture_scale = state.capture_scale.clone();
+    let ocr_backend = state.ocr_backend.clone();
 
     let handle = tokio::spawn(async move {
-        pipeline::run_pipeline(window, running, capture_region).await;
+        pipeline::run_pipeline(window, running, capture_region, language_pair, capture_scale, ocr_backend).await;
     });
 
     let mut pipeline = state.pipeline_handle.lock().await;
@@ -53,9 +79,7 @@ async fn start_translation(
 
 /// Stop the translation pipeline.
 #[tauri::command]
-async fn stop_translation(
-    state: tauri::State<'_, AppState>,
-) -> Result<String, String> {
+async fn stop_translation(state: tauri::State<'_, AppState>) -> Result<String, String> {
     state.running.store(false, Ordering::Relaxed);
 
     let mut pipeline = state.pipeline_handle.lock().await;
@@ -68,10 +92,7 @@ async fn stop_translation(
 
 /// Set click-through mode on or off.
 #[tauri::command]
-async fn set_click_through(
-    window: WebviewWindow,
-    enabled: bool,
-) -> Result<String, String> {
+async fn set_click_through(window: WebviewWindow, enabled: bool) -> Result<String, String> {
     window
         .set_ignore_cursor_events(enabled)
         .map_err(|e| format!("set_ignore_cursor_events error: {e}"))?;
@@ -79,21 +100,18 @@ async fn set_click_through(
     Ok(format!("Click-through set to {enabled}"))
 }
 
-/// Start a new snipping-style capture selection session.
+/// Start a new snipping-style capture selection session on the caller's monitor.
 #[tauri::command]
 async fn begin_new_capture(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
+    caller: WebviewWindow,
 ) -> Result<String, String> {
     let window = overlay_window(&app)?;
-    let control = app
-        .get_webview_window("control")
-        .ok_or_else(|| "Control window not found".to_string())?;
-
-    let current_bounds = get_window_bounds(&control)?;
+    let caller_bounds = get_window_bounds(&caller)?;
 
     // Persist control module bounds once so unlock can always return there.
-    {
+    if caller.label() == "control" {
         let has_locked_region = state
             .capture_region
             .lock()
@@ -106,10 +124,10 @@ async fn begin_new_capture(
                 .lock()
                 .map_err(|e| format!("Control bounds lock error: {e}"))?;
             *control = Some(pipeline::CaptureRegion {
-                x: current_bounds.0,
-                y: current_bounds.1,
-                width: current_bounds.2,
-                height: current_bounds.3,
+                x: caller_bounds.0,
+                y: caller_bounds.1,
+                width: caller_bounds.2,
+                height: caller_bounds.3,
             });
         }
     }
@@ -120,10 +138,10 @@ async fn begin_new_capture(
             .lock()
             .map_err(|e| format!("Snip restore lock error: {e}"))?;
         *restore = Some(pipeline::CaptureRegion {
-            x: current_bounds.0,
-            y: current_bounds.1,
-            width: current_bounds.2,
-            height: current_bounds.3,
+            x: caller_bounds.0,
+            y: caller_bounds.1,
+            width: caller_bounds.2,
+            height: caller_bounds.3,
         });
     }
 
@@ -135,9 +153,11 @@ async fn begin_new_capture(
         *region = None;
     }
 
-    let monitor_bounds = get_monitor_bounds_at_point(current_bounds.0, current_bounds.1)?;
+    let monitor_bounds = get_monitor_bounds_for_window(&caller)?;
 
-    window.show().map_err(|e| format!("show overlay error: {e}"))?;
+    window
+        .show()
+        .map_err(|e| format!("show overlay error: {e}"))?;
     window
         .set_ignore_cursor_events(false)
         .map_err(|e| format!("set_ignore_cursor_events error: {e}"))?;
@@ -156,7 +176,9 @@ async fn begin_new_capture(
         )))
         .map_err(|e| format!("set_size error: {e}"))?;
 
-    window.set_focus().map_err(|e| format!("set_focus error: {e}"))?;
+    window
+        .set_focus()
+        .map_err(|e| format!("set_focus error: {e}"))?;
     window
         .emit("overlay-mode", "snip")
         .map_err(|e| format!("emit overlay-mode error: {e}"))?;
@@ -175,6 +197,7 @@ async fn finish_new_capture(
     y: i32,
     width: u32,
     height: u32,
+    scale_factor: f64,
 ) -> Result<String, String> {
     if width < 8 || height < 8 {
         return Err("Selected region is too small".to_string());
@@ -184,12 +207,31 @@ async fn finish_new_capture(
         .outer_position()
         .map_err(|e| format!("outer_position: {e}"))?;
 
-    let absolute = pipeline::CaptureRegion {
-        x: win_pos.x + x,
-        y: win_pos.y + y,
-        width,
-        height,
+    let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
     };
+
+    let scaled_x = (x as f64 * scale).round() as i32;
+    let scaled_y = (y as f64 * scale).round() as i32;
+    let scaled_width = (width as f64 * scale).round().max(1.0) as u32;
+    let scaled_height = (height as f64 * scale).round().max(1.0) as u32;
+
+    let absolute = pipeline::CaptureRegion {
+        x: win_pos.x + scaled_x,
+        y: win_pos.y + scaled_y,
+        width: scaled_width,
+        height: scaled_height,
+    };
+
+    {
+        let mut stored_scale = state
+            .capture_scale
+            .lock()
+            .map_err(|e| format!("Capture scale lock error: {e}"))?;
+        *stored_scale = scale;
+    }
 
     {
         let mut region = state
@@ -198,15 +240,6 @@ async fn finish_new_capture(
             .map_err(|e| format!("Capture region lock error: {e}"))?;
         *region = Some(absolute);
     }
-
-    // Keep the translation overlay directly on top of the selected text region.
-    window
-        .set_position(Position::Physical(PhysicalPosition::new(absolute.x, absolute.y)))
-        .map_err(|e| format!("set_position error: {e}"))?;
-
-    window
-        .set_size(Size::Physical(PhysicalSize::new(absolute.width, absolute.height)))
-        .map_err(|e| format!("set_size error: {e}"))?;
 
     capture::reset_diff();
 
@@ -224,7 +257,9 @@ async fn cancel_new_capture(
 ) -> Result<String, String> {
     let window = overlay_window(&app)?;
     restore_window_bounds(&window, &state)?;
-    window.hide().map_err(|e| format!("hide overlay error: {e}"))?;
+    window
+        .hide()
+        .map_err(|e| format!("hide overlay error: {e}"))?;
     Ok("Snip capture canceled".to_string())
 }
 
@@ -251,15 +286,22 @@ async fn unlock_capture(
 
     if let Some(bounds) = control {
         window
-            .set_position(Position::Physical(PhysicalPosition::new(bounds.x, bounds.y)))
+            .set_position(Position::Physical(PhysicalPosition::new(
+                bounds.x, bounds.y,
+            )))
             .map_err(|e| format!("unlock set_position error: {e}"))?;
 
         window
-            .set_size(Size::Physical(PhysicalSize::new(bounds.width, bounds.height)))
+            .set_size(Size::Physical(PhysicalSize::new(
+                bounds.width,
+                bounds.height,
+            )))
             .map_err(|e| format!("unlock set_size error: {e}"))?;
     }
 
-    window.hide().map_err(|e| format!("hide overlay error: {e}"))?;
+    window
+        .hide()
+        .map_err(|e| format!("hide overlay error: {e}"))?;
 
     if let Some(control_window) = app.get_webview_window("control") {
         let _ = control_window.show();
@@ -283,10 +325,64 @@ fn init_engine(app: AppHandle, language_pair: String) -> Result<String, String> 
     }
 }
 
+#[tauri::command]
+fn check_ocr_support(language_pair: String) -> Result<bool, String> {
+    ocr::is_language_supported(&language_pair)
+}
+
+#[tauri::command]
+fn check_ocr_backend_support(backend: String) -> Result<bool, String> {
+    let parsed = ocr::OcrBackend::from_str(&backend);
+    ocr::is_backend_available(parsed)
+}
+
+#[tauri::command]
+fn set_ocr_backend(state: tauri::State<'_, AppState>, backend: String) -> Result<String, String> {
+    let parsed = ocr::OcrBackend::from_str(&backend);
+    let mut selected_backend = state
+        .ocr_backend
+        .lock()
+        .map_err(|e| format!("OCR backend lock error: {e}"))?;
+    *selected_backend = parsed.as_str().to_string();
+    Ok(format!("OCR backend set to {}", parsed.as_str()))
+}
+
+#[tauri::command]
+fn get_ocr_backend(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let selected_backend = state
+        .ocr_backend
+        .lock()
+        .map_err(|e| format!("OCR backend lock error: {e}"))?;
+    Ok(selected_backend.clone())
+}
+
+#[derive(serde::Serialize)]
+struct OcrDiagnostics {
+    backend: String,
+    backend_available: bool,
+    language_pair: String,
+    language_supported: bool,
+    fallback_policy: String,
+}
+
+#[tauri::command]
+fn get_ocr_diagnostics(language_pair: String, backend: String) -> Result<OcrDiagnostics, String> {
+    let parsed = ocr::OcrBackend::from_str(&backend);
+    let backend_available = ocr::is_backend_available(parsed)?;
+    let language_supported = ocr::is_language_supported_for_backend(parsed, &language_pair)?;
+
+    Ok(OcrDiagnostics {
+        backend: parsed.as_str().to_string(),
+        backend_available,
+        language_pair,
+        language_supported,
+        fallback_policy: parsed.fallback_policy().to_string(),
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -296,6 +392,9 @@ pub fn run() {
             capture_region: Arc::new(StdMutex::new(None)),
             snip_restore_bounds: Arc::new(StdMutex::new(None)),
             control_bounds: Arc::new(StdMutex::new(None)),
+            language_pair: Arc::new(StdMutex::new("ja-en".to_string())),
+            capture_scale: Arc::new(StdMutex::new(1.0)),
+            ocr_backend: Arc::new(StdMutex::new("auto".to_string())),
         })
         .invoke_handler(tauri::generate_handler![
             start_translation,
@@ -307,10 +406,16 @@ pub fn run() {
             unlock_capture,
             downloader::download_models,
             downloader::check_models,
+            check_ocr_support,
+            check_ocr_backend_support,
+            set_ocr_backend,
+            get_ocr_backend,
+            get_ocr_diagnostics,
             init_engine,
         ])
         .setup(|app| {
             if let Some(overlay) = app.get_webview_window("overlay") {
+                let _ = overlay.set_content_protected(true);
                 let _ = overlay.hide();
             }
             Ok(())
@@ -326,7 +431,9 @@ fn overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
 
 pub(crate) fn models_root_dir(app: &AppHandle) -> Result<PathBuf, String> {
     // Store models next to bundled resources so they live on the install disk chosen by the user.
-    let resource_dir = app.path().resource_dir()
+    let resource_dir = app
+        .path()
+        .resource_dir()
         .map_err(|e| format!("Could not determine resources directory: {e}"))?;
 
     Ok(resource_dir.join("models"))
@@ -385,7 +492,24 @@ fn get_monitor_bounds_at_point(x: i32, y: i32) -> Result<(i32, i32, u32, u32), S
     ))
 }
 
-fn restore_window_bounds(window: &WebviewWindow, state: &tauri::State<'_, AppState>) -> Result<(), String> {
+fn get_monitor_bounds_for_window(window: &WebviewWindow) -> Result<(i32, i32, u32, u32), String> {
+    if let Some(monitor) = window
+        .current_monitor()
+        .map_err(|e| format!("current_monitor: {e}"))?
+    {
+        let position = monitor.position();
+        let size = monitor.size();
+        return Ok((position.x, position.y, size.width, size.height));
+    }
+
+    let (x, y, _, _) = get_window_bounds(window)?;
+    get_monitor_bounds_at_point(x, y)
+}
+
+fn restore_window_bounds(
+    window: &WebviewWindow,
+    state: &tauri::State<'_, AppState>,
+) -> Result<(), String> {
     let restore = state
         .snip_restore_bounds
         .lock()
@@ -394,11 +518,16 @@ fn restore_window_bounds(window: &WebviewWindow, state: &tauri::State<'_, AppSta
 
     if let Some(bounds) = restore {
         window
-            .set_position(Position::Physical(PhysicalPosition::new(bounds.x, bounds.y)))
+            .set_position(Position::Physical(PhysicalPosition::new(
+                bounds.x, bounds.y,
+            )))
             .map_err(|e| format!("restore set_position error: {e}"))?;
 
         window
-            .set_size(Size::Physical(PhysicalSize::new(bounds.width, bounds.height)))
+            .set_size(Size::Physical(PhysicalSize::new(
+                bounds.width,
+                bounds.height,
+            )))
             .map_err(|e| format!("restore set_size error: {e}"))?;
     }
 
