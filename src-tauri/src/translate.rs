@@ -2,8 +2,8 @@ use ort::session::Session;
 use ort::value::Value;
 use serde::Deserialize;
 use std::fs;
-use std::path::Path;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use tokenizers::Tokenizer;
 
@@ -16,6 +16,8 @@ struct TranslationEngine {
     decoder_start_token_id: i64,
     eos_token_id: i64,
     max_length: usize,
+    beam_size: usize,
+    length_penalty: f32,
 }
 
 static ENGINE: OnceLock<RwLock<Option<Arc<TranslationEngine>>>> = OnceLock::new();
@@ -25,6 +27,8 @@ struct GenerationSettings {
     decoder_start_token_id: i64,
     eos_token_id: i64,
     max_length: usize,
+    beam_size: usize,
+    length_penalty: f32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,6 +38,20 @@ struct GenerationConfig {
     forced_eos_token_id: Option<i64>,
     pad_token_id: Option<i64>,
     max_length: Option<usize>,
+    num_beams: Option<usize>,
+    length_penalty: Option<f32>,
+}
+
+#[derive(Debug, Clone)]
+struct Beam {
+    token_ids: Vec<i64>,
+    log_prob: f32,
+}
+
+#[derive(Debug, Clone)]
+struct CompletedBeam {
+    token_ids: Vec<i64>,
+    score: f32,
 }
 
 fn engine_slot() -> &'static RwLock<Option<Arc<TranslationEngine>>> {
@@ -102,9 +120,7 @@ fn sanitize_precompiled_normalizers(value: &mut serde_json::Value) {
     }
 }
 
-fn is_invalid_precompiled_normalizer(
-    map: &serde_json::Map<String, serde_json::Value>,
-) -> bool {
+fn is_invalid_precompiled_normalizer(map: &serde_json::Map<String, serde_json::Value>) -> bool {
     map.get("type")
         .and_then(|value| value.as_str())
         .map(|kind| kind == "Precompiled")
@@ -166,13 +182,13 @@ fn load_tokenizer_from_bytes(bytes: &[u8], label: &str) -> Result<Tokenizer, Str
 }
 
 fn load_tokenizer(tokenizer_path: &Path) -> Result<Tokenizer, String> {
-    match catch_unwind(AssertUnwindSafe(|| {
-        Tokenizer::from_file(tokenizer_path)
-    })) {
+    match catch_unwind(AssertUnwindSafe(|| Tokenizer::from_file(tokenizer_path))) {
         Ok(Ok(tokenizer)) => return Ok(tokenizer),
         Ok(Err(primary_error)) => {
             let primary_msg = primary_error.to_string();
-            if !primary_msg.contains("Precompiled") || !primary_msg.contains("expected a borrowed string") {
+            if !primary_msg.contains("Precompiled")
+                || !primary_msg.contains("expected a borrowed string")
+            {
                 return Err(format!("Failed to load tokenizer: {primary_error}"));
             }
         }
@@ -211,9 +227,8 @@ fn load_tokenizer(tokenizer_path: &Path) -> Result<Tokenizer, String> {
             let stripped = serde_json::to_vec(&json)
                 .map_err(|e| format!("Failed to serialize stripped tokenizer JSON: {e}"))?;
 
-            load_tokenizer_from_bytes(&stripped, "stripped tokenizer fallback").map_err(
-                |stripped_error| format!("{sanitized_error}; {stripped_error}"),
-            )
+            load_tokenizer_from_bytes(&stripped, "stripped tokenizer fallback")
+                .map_err(|stripped_error| format!("{sanitized_error}; {stripped_error}"))
         }
     }
 }
@@ -235,10 +250,15 @@ fn fallback_generation_settings(tokenizer: &Tokenizer) -> Result<GenerationSetti
         decoder_start_token_id,
         eos_token_id,
         max_length: 512,
+        beam_size: 4,
+        length_penalty: 1.0,
     })
 }
 
-fn load_generation_settings(model_dir: &Path, tokenizer: &Tokenizer) -> Result<GenerationSettings, String> {
+fn load_generation_settings(
+    model_dir: &Path,
+    tokenizer: &Tokenizer,
+) -> Result<GenerationSettings, String> {
     let fallback = fallback_generation_settings(tokenizer)?;
     let generation_config_path = model_dir.join("generation_config.json");
 
@@ -261,7 +281,64 @@ fn load_generation_settings(model_dir: &Path, tokenizer: &Tokenizer) -> Result<G
             .or(config.forced_eos_token_id)
             .unwrap_or(fallback.eos_token_id),
         max_length: config.max_length.unwrap_or(fallback.max_length),
+        beam_size: config.num_beams.unwrap_or(fallback.beam_size).max(1),
+        length_penalty: config.length_penalty.unwrap_or(fallback.length_penalty),
     })
+}
+
+fn generated_token_count(token_ids: &[i64], eos_token_id: i64) -> usize {
+    let mut count = token_ids.len().saturating_sub(1);
+    if token_ids.last().copied() == Some(eos_token_id) {
+        count = count.saturating_sub(1);
+    }
+    count.max(1)
+}
+
+fn length_penalized_score(
+    log_prob: f32,
+    token_ids: &[i64],
+    eos_token_id: i64,
+    length_penalty: f32,
+) -> f32 {
+    let length = generated_token_count(token_ids, eos_token_id) as f32;
+    let penalty = ((5.0 + length) / 6.0).powf(length_penalty.max(0.0));
+    log_prob / penalty
+}
+
+fn top_k_log_probs(logits: &[f32], k: usize) -> Vec<(i64, f32)> {
+    if logits.is_empty() || k == 0 {
+        return Vec::new();
+    }
+
+    let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let logsumexp = max_logit
+        + logits
+            .iter()
+            .map(|&logit| (logit - max_logit).exp())
+            .sum::<f32>()
+            .ln();
+
+    let mut top: Vec<(i64, f32)> = Vec::with_capacity(k.min(logits.len()));
+    for (token_id, &logit) in logits.iter().enumerate() {
+        let log_prob = logit - logsumexp;
+        if top.len() < top.capacity() {
+            top.push((token_id as i64, log_prob));
+            top.sort_by(|left, right| right.1.total_cmp(&left.1));
+            continue;
+        }
+
+        if top
+            .last()
+            .map(|(_, score)| log_prob > *score)
+            .unwrap_or(true)
+        {
+            top.pop();
+            top.push((token_id as i64, log_prob));
+            top.sort_by(|left, right| right.1.total_cmp(&left.1));
+        }
+    }
+
+    top
 }
 
 #[cfg(test)]
@@ -303,6 +380,15 @@ mod tests {
             json!([{ "type": "NFC" }])
         );
     }
+
+    #[test]
+    fn top_k_log_probs_returns_descending_candidates() {
+        let top = top_k_log_probs(&[0.0, 1.5, -2.0, 1.0], 2);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].0, 1);
+        assert_eq!(top[1].0, 3);
+        assert!(top[0].1 >= top[1].1);
+    }
 }
 
 /// Initialize the translation engine by loading model files from the given directory.
@@ -320,13 +406,19 @@ pub fn init(model_dir: &Path) -> Result<(), String> {
     let tokenizer_path = model_dir.join("tokenizer.json");
 
     if !encoder_path.exists() {
-        return Err(format!("Encoder model not found: {}", encoder_path.display()));
+        return Err(format!(
+            "Encoder model not found: {}",
+            encoder_path.display()
+        ));
     }
     if !tokenizer_path.exists() {
         return Err(format!("Tokenizer not found: {}", tokenizer_path.display()));
     }
     if !merged_decoder_path.exists() && !plain_decoder_path.exists() {
-        return Err("Decoder model not found (expected decoder_model_merged.onnx or decoder_model.onnx)".to_string());
+        return Err(
+            "Decoder model not found (expected decoder_model_merged.onnx or decoder_model.onnx)"
+                .to_string(),
+        );
     }
 
     let encoder = commit_session(&encoder_path, "encoder model")?;
@@ -356,10 +448,12 @@ pub fn init(model_dir: &Path) -> Result<(), String> {
     let generation = load_generation_settings(model_dir, &tokenizer)?;
 
     log::info!(
-        "Generation settings resolved: decoder_start_token_id={}, eos_token_id={}, max_length={}",
+        "Generation settings resolved: decoder_start_token_id={}, eos_token_id={}, max_length={}, beam_size={}, length_penalty={}",
         generation.decoder_start_token_id,
         generation.eos_token_id,
-        generation.max_length
+        generation.max_length,
+        generation.beam_size,
+        generation.length_penalty
     );
 
     let engine = Arc::new(TranslationEngine {
@@ -369,6 +463,8 @@ pub fn init(model_dir: &Path) -> Result<(), String> {
         decoder_start_token_id: generation.decoder_start_token_id,
         eos_token_id: generation.eos_token_id,
         max_length: generation.max_length,
+        beam_size: generation.beam_size,
+        length_penalty: generation.length_penalty,
     });
 
     let mut slot = engine_slot()
@@ -386,8 +482,7 @@ pub fn translate(text: &str) -> Result<String, String> {
         let slot = engine_slot()
             .read()
             .map_err(|e| format!("Engine read lock error: {e}"))?;
-        slot
-            .as_ref()
+        slot.as_ref()
             .cloned()
             .ok_or("Translation engine not initialized")?
     };
@@ -396,7 +491,6 @@ pub fn translate(text: &str) -> Result<String, String> {
         return Ok(String::new());
     }
 
-    // Tokenize input
     let encoding = engine
         .tokenizer
         .encode(text, true)
@@ -411,7 +505,6 @@ pub fn translate(text: &str) -> Result<String, String> {
 
     let seq_len = input_ids.len();
 
-    // Create input Value tensors for encoder
     let input_ids_value = Value::from_array(
         ndarray::Array2::from_shape_vec((1, seq_len), input_ids.clone())
             .map_err(|e| format!("Shape error: {e}"))?,
@@ -424,8 +517,10 @@ pub fn translate(text: &str) -> Result<String, String> {
     )
     .map_err(|e| format!("Value creation error: {e}"))?;
 
-    // Run encoder — keep the lock guard alive as long as encoder_outputs exists
-    let mut encoder_session = engine.encoder.lock()
+    // Keep the encoder session guard alive while decoder consumes encoder outputs.
+    let mut encoder_session = engine
+        .encoder
+        .lock()
         .map_err(|e| format!("Encoder lock error: {e}"))?;
 
     let encoder_outputs = encoder_session
@@ -435,79 +530,134 @@ pub fn translate(text: &str) -> Result<String, String> {
         ])
         .map_err(|e| format!("Encoder run error: {e}"))?;
 
-    // Autoregressive decoding
-    let mut decoder_input_ids: Vec<i64> = vec![engine.decoder_start_token_id];
+    let encoder_hidden = &encoder_outputs["last_hidden_state"];
+    let beam_size = engine.beam_size.max(1);
+    let mut active_beams = vec![Beam {
+        token_ids: vec![engine.decoder_start_token_id],
+        log_prob: 0.0,
+    }];
+    let mut completed_beams: Vec<CompletedBeam> = Vec::new();
 
     for _ in 0..engine.max_length {
-        let dec_len = decoder_input_ids.len();
-
-        let decoder_input_value = Value::from_array(
-            ndarray::Array2::from_shape_vec((1, dec_len), decoder_input_ids.clone())
-                .map_err(|e| format!("Decoder shape error: {e}"))?,
-        )
-        .map_err(|e| format!("Value creation error: {e}"))?;
-
-        let enc_attn_mask_value = Value::from_array(
-            ndarray::Array2::from_shape_vec((1, seq_len), attention_mask.clone())
-                .map_err(|e| format!("Shape error: {e}"))?,
-        )
-        .map_err(|e| format!("Value creation error: {e}"))?;
-
-        // Extract encoder hidden states and pass them to the decoder
-        let encoder_hidden = &encoder_outputs["last_hidden_state"];
-
-        // Run decoder — extract best_id within this block so outputs can be dropped
-        let best_id = {
-            let mut decoder_session = engine.decoder.lock()
-                .map_err(|e| format!("Decoder lock error: {e}"))?;
-
-            let decoder_outputs = decoder_session
-                .run(ort::inputs![
-                    "input_ids" => decoder_input_value,
-                    "encoder_attention_mask" => enc_attn_mask_value,
-                    "encoder_hidden_states" => encoder_hidden,
-                ])
-                .map_err(|e| format!("Decoder run error: {e}"))?;
-
-            // Get logits for the last token — try_extract_tensor returns (&Shape, &[f32])
-            let logits_value = &decoder_outputs["logits"];
-            let (logits_shape, logits_data) = logits_value
-                .try_extract_tensor::<f32>()
-                .map_err(|e| format!("Extract logits error: {e}"))?;
-
-            // Shape is [batch=1, seq_len, vocab_size]
-            let shape_dims: &[i64] = &**logits_shape;
-            let vocab_size = shape_dims[2] as usize;
-            let logits_seq_len = shape_dims[1] as usize;
-
-            // Get logits for the last position — greedy decoding
-            let last_pos = logits_seq_len - 1;
-            let offset = last_pos * vocab_size;
-            let mut best_id = 0i64;
-            let mut best_score = f32::NEG_INFINITY;
-
-            for v in 0..vocab_size {
-                let score = logits_data[offset + v];
-                if score > best_score {
-                    best_score = score;
-                    best_id = v as i64;
-                }
-            }
-
-            best_id
-        }; // decoder_session and decoder_outputs dropped here
-
-        if best_id == engine.eos_token_id {
+        if active_beams.is_empty() {
             break;
         }
 
-        decoder_input_ids.push(best_id);
+        let mut candidate_beams = Vec::with_capacity(active_beams.len().saturating_mul(beam_size));
+
+        for beam in &active_beams {
+            let dec_len = beam.token_ids.len();
+
+            let decoder_input_value = Value::from_array(
+                ndarray::Array2::from_shape_vec((1, dec_len), beam.token_ids.clone())
+                    .map_err(|e| format!("Decoder shape error: {e}"))?,
+            )
+            .map_err(|e| format!("Value creation error: {e}"))?;
+
+            let enc_attn_mask_value = Value::from_array(
+                ndarray::Array2::from_shape_vec((1, seq_len), attention_mask.clone())
+                    .map_err(|e| format!("Shape error: {e}"))?,
+            )
+            .map_err(|e| format!("Value creation error: {e}"))?;
+
+            let next_tokens = {
+                let mut decoder_session = engine
+                    .decoder
+                    .lock()
+                    .map_err(|e| format!("Decoder lock error: {e}"))?;
+
+                let decoder_outputs = decoder_session
+                    .run(ort::inputs![
+                        "input_ids" => decoder_input_value,
+                        "encoder_attention_mask" => enc_attn_mask_value,
+                        "encoder_hidden_states" => encoder_hidden,
+                    ])
+                    .map_err(|e| format!("Decoder run error: {e}"))?;
+
+                let logits_value = &decoder_outputs["logits"];
+                let (logits_shape, logits_data) = logits_value
+                    .try_extract_tensor::<f32>()
+                    .map_err(|e| format!("Extract logits error: {e}"))?;
+
+                let shape_dims: &[i64] = &**logits_shape;
+                if shape_dims.len() < 3 {
+                    return Err(format!("Unexpected logits rank: {:?}", shape_dims));
+                }
+
+                let vocab_size = shape_dims[2] as usize;
+                let logits_seq_len = shape_dims[1] as usize;
+                if vocab_size == 0 || logits_seq_len == 0 {
+                    return Err("Decoder returned empty logits tensor".to_string());
+                }
+
+                let last_pos = logits_seq_len - 1;
+                let offset = last_pos * vocab_size;
+                let last_logits = &logits_data[offset..offset + vocab_size];
+                top_k_log_probs(last_logits, beam_size)
+            };
+
+            for (token_id, token_log_prob) in next_tokens {
+                let mut next_ids = beam.token_ids.clone();
+                next_ids.push(token_id);
+                candidate_beams.push(Beam {
+                    token_ids: next_ids,
+                    log_prob: beam.log_prob + token_log_prob,
+                });
+            }
+        }
+
+        if candidate_beams.is_empty() {
+            break;
+        }
+
+        candidate_beams.sort_by(|left, right| right.log_prob.total_cmp(&left.log_prob));
+
+        let mut next_active_beams = Vec::with_capacity(beam_size);
+        for candidate in candidate_beams {
+            if candidate.token_ids.last().copied() == Some(engine.eos_token_id) {
+                completed_beams.push(CompletedBeam {
+                    score: length_penalized_score(
+                        candidate.log_prob,
+                        &candidate.token_ids,
+                        engine.eos_token_id,
+                        engine.length_penalty,
+                    ),
+                    token_ids: candidate.token_ids,
+                });
+            } else if next_active_beams.len() < beam_size {
+                next_active_beams.push(candidate);
+            }
+
+            if next_active_beams.len() >= beam_size {
+                break;
+            }
+        }
+
+        active_beams = next_active_beams;
     }
 
-    // Decode output token IDs (skip the initial pad token)
-    let output_ids: Vec<u32> = decoder_input_ids[1..]
+    completed_beams.extend(active_beams.into_iter().map(|beam| CompletedBeam {
+        score: length_penalized_score(
+            beam.log_prob,
+            &beam.token_ids,
+            engine.eos_token_id,
+            engine.length_penalty,
+        ),
+        token_ids: beam.token_ids,
+    }));
+
+    let best_beam = completed_beams
+        .into_iter()
+        .max_by(|left, right| left.score.total_cmp(&right.score))
+        .ok_or_else(|| "Beam search produced no output".to_string())?;
+
+    let output_ids: Vec<u32> = best_beam
+        .token_ids
         .iter()
-        .map(|&id| id as u32)
+        .skip(1)
+        .copied()
+        .filter(|&id| id != engine.eos_token_id)
+        .map(|id| id as u32)
         .collect();
 
     let decoded = engine

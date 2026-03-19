@@ -1,8 +1,8 @@
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::collections::{HashMap, VecDeque};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use tauri::{Emitter, WebviewWindow};
 
 use crate::capture;
@@ -65,7 +65,11 @@ fn overlap_ratio(a: &ocr::OcrLine, b: &ocr::OcrLine) -> f32 {
     let b_area = ((bx2 - bx1).max(0) * (by2 - by1).max(0)) as f32;
     let union = a_area + b_area - inter;
 
-    if union <= 0.0 { 0.0 } else { inter / union }
+    if union <= 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
 }
 
 fn dedupe_lines(lines: Vec<ocr::OcrLine>) -> Vec<ocr::OcrLine> {
@@ -98,6 +102,202 @@ fn dedupe_lines(lines: Vec<ocr::OcrLine>) -> Vec<ocr::OcrLine> {
     }
 
     kept
+}
+
+#[derive(Clone, Debug)]
+struct ParagraphBlock {
+    lines: Vec<ocr::OcrLine>,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    total_height: u32,
+    total_left: i64,
+    total_center_x: i64,
+}
+
+impl ParagraphBlock {
+    fn new(line: ocr::OcrLine) -> Self {
+        let right = line.left + line.width as i32;
+        let bottom = line.top + line.height as i32;
+        let center_x = line.left + (line.width as i32 / 2);
+
+        Self {
+            lines: vec![line.clone()],
+            left: line.left,
+            top: line.top,
+            right,
+            bottom,
+            total_height: line.height,
+            total_left: line.left as i64,
+            total_center_x: center_x as i64,
+        }
+    }
+
+    fn push(&mut self, line: ocr::OcrLine) {
+        let right = line.left + line.width as i32;
+        let bottom = line.top + line.height as i32;
+        let center_x = line.left + (line.width as i32 / 2);
+
+        self.left = self.left.min(line.left);
+        self.top = self.top.min(line.top);
+        self.right = self.right.max(right);
+        self.bottom = self.bottom.max(bottom);
+        self.total_height = self.total_height.saturating_add(line.height);
+        self.total_left += line.left as i64;
+        self.total_center_x += center_x as i64;
+        self.lines.push(line);
+        self.lines.sort_by_key(|entry| (entry.top, entry.left));
+    }
+
+    fn width(&self) -> u32 {
+        (self.right - self.left).max(0) as u32
+    }
+
+    fn height(&self) -> u32 {
+        (self.bottom - self.top).max(0) as u32
+    }
+
+    fn average_height(&self) -> f32 {
+        self.total_height as f32 / self.lines.len().max(1) as f32
+    }
+
+    fn average_left(&self) -> f32 {
+        self.total_left as f32 / self.lines.len().max(1) as f32
+    }
+
+    fn average_center_x(&self) -> f32 {
+        self.total_center_x as f32 / self.lines.len().max(1) as f32
+    }
+
+    fn last_line(&self) -> &ocr::OcrLine {
+        self.lines
+            .last()
+            .expect("ParagraphBlock always contains at least one line")
+    }
+
+    fn source_text(&self) -> String {
+        join_lines_into_paragraph(&self.lines)
+    }
+}
+
+fn join_lines_into_paragraph(lines: &[ocr::OcrLine]) -> String {
+    let mut paragraph = String::new();
+
+    for line in lines {
+        let segment = line.text.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        if segment.is_empty() {
+            continue;
+        }
+
+        if paragraph.is_empty() {
+            paragraph.push_str(&segment);
+            continue;
+        }
+
+        let starts_with_punctuation = segment
+            .chars()
+            .next()
+            .map(|ch| ",.;:!?)]}".contains(ch))
+            .unwrap_or(false);
+
+        if paragraph.ends_with('-')
+            && segment
+                .chars()
+                .next()
+                .map(|ch| ch.is_alphanumeric())
+                .unwrap_or(false)
+        {
+            paragraph.pop();
+            paragraph.push_str(&segment);
+        } else if starts_with_punctuation {
+            paragraph.push_str(&segment);
+        } else {
+            paragraph.push(' ');
+            paragraph.push_str(&segment);
+        }
+    }
+
+    paragraph
+}
+
+fn horizontal_overlap_ratio(block: &ParagraphBlock, line: &ocr::OcrLine) -> f32 {
+    let line_right = line.left + line.width as i32;
+    let overlap = (block.right.min(line_right) - block.left.max(line.left)).max(0) as f32;
+    let reference_width = block.width().min(line.width).max(1) as f32;
+    overlap / reference_width
+}
+
+fn block_match_score(block: &ParagraphBlock, line: &ocr::OcrLine) -> Option<f32> {
+    let last_line = block.last_line();
+    let last_bottom = last_line.top + last_line.height as i32;
+    let avg_height = block.average_height().max(line.height as f32);
+    let vertical_gap = line.top - last_bottom;
+    let max_vertical_gap = ((avg_height * 1.1).round() as i32).max(14);
+
+    if vertical_gap > max_vertical_gap {
+        return None;
+    }
+
+    if vertical_gap < -((avg_height * 0.75).round() as i32) {
+        return None;
+    }
+
+    let overlap_ratio = horizontal_overlap_ratio(block, line);
+    let left_diff = (line.left as f32 - block.average_left()).abs();
+    let line_center_x = line.left as f32 + (line.width as f32 / 2.0);
+    let center_diff = (line_center_x - block.average_center_x()).abs();
+    let max_left_diff = ((avg_height * 2.5).round() as i32).max(28);
+    let max_center_diff =
+        ((block.width().max(line.width) as f32 * 0.45).round() as i32).max(max_left_diff);
+
+    let horizontally_aligned = overlap_ratio >= 0.2
+        || left_diff <= max_left_diff as f32
+        || center_diff <= max_center_diff as f32;
+
+    if !horizontally_aligned {
+        return None;
+    }
+
+    let same_row_offset = (line.top - last_line.top).abs();
+    if same_row_offset <= ((avg_height * 0.35).round() as i32)
+        && overlap_ratio < 0.15
+        && left_diff > max_left_diff as f32
+    {
+        return None;
+    }
+
+    let gap_penalty = vertical_gap.max(0) as f32 / (max_vertical_gap as f32 + 1.0);
+    let left_penalty = left_diff / (max_left_diff as f32 + 1.0);
+    let center_penalty = center_diff / (max_center_diff as f32 + 1.0);
+
+    Some(overlap_ratio * 2.0 + (1.0 - gap_penalty) - left_penalty * 0.7 - center_penalty * 0.5)
+}
+
+fn group_lines_into_blocks(mut lines: Vec<ocr::OcrLine>) -> Vec<ParagraphBlock> {
+    lines.retain(|line| !line.text.trim().is_empty() && line.width >= 6 && line.height >= 6);
+    lines.sort_by_key(|line| (line.top, line.left));
+
+    let mut blocks: Vec<ParagraphBlock> = Vec::new();
+
+    for line in lines {
+        let best_match = blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, block)| block_match_score(block, &line).map(|score| (idx, score)))
+            .max_by(|(_, left_score), (_, right_score)| left_score.total_cmp(right_score))
+            .map(|(idx, _)| idx);
+
+        if let Some(idx) = best_match {
+            blocks[idx].push(line);
+        } else {
+            blocks.push(ParagraphBlock::new(line));
+        }
+    }
+
+    blocks.sort_by_key(|block| (block.top, block.left));
+    blocks
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -178,10 +378,8 @@ pub async fn run_pipeline(
         };
 
         // Step 1: Capture the screen region and check for changes
-        let capture_result = tokio::task::spawn_blocking(move || {
-            capture::capture_region(x, y, width, height)
-        })
-        .await;
+        let capture_result =
+            tokio::task::spawn_blocking(move || capture::capture_region(x, y, width, height)).await;
 
         let image = match capture_result {
             Ok(Ok(Some(img))) => img,
@@ -280,88 +478,99 @@ pub async fn run_pipeline(
             }
         };
 
-        let source_text = ocr_output.text.clone();
+        let ocr_source_text = ocr_output.text.clone();
         let effective_language_tag = ocr_output.language_tag.clone();
         let used_profile_fallback = ocr_output.used_profile_fallback;
 
-        log::info!("OCR detected: {}", &source_text);
+        log::info!("OCR detected: {}", &ocr_source_text);
 
-        // Step 3: Translate per OCR line to keep location mapping accurate.
-        let mut ordered_lines = dedupe_lines(ocr_output.lines.clone());
-        ordered_lines.sort_by_key(|line| (line.top, line.left));
+        // Step 3: Group OCR lines into paragraph-like blocks before translation.
+        let paragraph_blocks = group_lines_into_blocks(dedupe_lines(ocr_output.lines.clone()));
 
-        let mut translated_lines = Vec::with_capacity(ordered_lines.len());
-        for line in &ordered_lines {
-            if line.text.trim().is_empty() {
+        let mut translated_lines = Vec::with_capacity(paragraph_blocks.len());
+        for block in &paragraph_blocks {
+            let block_source = block.source_text();
+            if block_source.trim().is_empty() {
                 continue;
             }
 
-            if line.width < 6 || line.height < 6 {
-                continue;
-            }
+            let block_width = block.width();
+            let block_height = block.height();
+            let line_id = make_line_id(
+                &block_source,
+                block.left,
+                block.top,
+                block_width,
+                block_height,
+            );
 
-            let line_source = line.text.clone();
-            let line_id = make_line_id(&line_source, line.left, line.top, line.width, line.height);
-
-            if let Some(cached) = translation_cache.get(&line_source) {
+            if let Some(cached) = translation_cache.get(&block_source) {
                 translated_lines.push(TranslatedLine {
                     line_id,
-                    source_text: line_source.clone(),
+                    source_text: block_source.clone(),
                     translated_text: cached.clone(),
-                    left: line.left,
-                    top: line.top,
-                    width: line.width,
-                    height: line.height,
+                    left: block.left,
+                    top: block.top,
+                    width: block_width,
+                    height: block_height,
                 });
                 continue;
             }
 
-            let source_for_task = line_source.clone();
-            let line_translate_result = tokio::task::spawn_blocking(move || {
-                translate::translate(&source_for_task)
-            })
-            .await;
+            let source_for_task = block_source.clone();
+            let block_translate_result =
+                tokio::task::spawn_blocking(move || translate::translate(&source_for_task)).await;
 
-            let line_translated = match line_translate_result {
+            let block_translated = match block_translate_result {
                 Ok(Ok(text)) if !text.trim().is_empty() => text,
-                Ok(Ok(_)) => line_source.clone(),
+                Ok(Ok(_)) => block_source.clone(),
                 Ok(Err(e)) => {
-                    log::warn!("Line translation error: {e}");
-                    line_source.clone()
+                    log::warn!("Block translation error: {e}");
+                    block_source.clone()
                 }
                 Err(e) => {
-                    log::warn!("Line translation join error: {e}");
-                    line_source.clone()
+                    log::warn!("Block translation join error: {e}");
+                    block_source.clone()
                 }
             };
 
             cache_insert(
                 &mut translation_cache,
                 &mut cache_order,
-                line_source.clone(),
-                line_translated.clone(),
+                block_source.clone(),
+                block_translated.clone(),
                 CACHE_CAPACITY,
             );
 
             translated_lines.push(TranslatedLine {
                 line_id,
-                source_text: line_source,
-                translated_text: line_translated,
-                left: line.left,
-                top: line.top,
-                width: line.width,
-                height: line.height,
+                source_text: block_source,
+                translated_text: block_translated,
+                left: block.left,
+                top: block.top,
+                width: block_width,
+                height: block_height,
             });
         }
 
+        let source_text = if translated_lines.is_empty() {
+            ocr_source_text.clone()
+        } else {
+            translated_lines
+                .iter()
+                .map(|line| line.source_text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        };
+
         let translated = if translated_lines.is_empty() {
-            source_text.clone()
+            ocr_source_text.clone()
         } else {
             translated_lines
                 .iter()
                 .map(|line| line.translated_text.as_str())
                 .collect::<Vec<_>>()
-                .join("\n")
+                .join("\n\n")
         };
 
         log::info!("Translated: {}", &translated);
@@ -381,7 +590,11 @@ pub async fn run_pipeline(
             text: translated,
             source_text,
             lines: translated_lines,
-            capture_scale: if scale.is_finite() && scale > 0.0 { scale } else { 1.0 },
+            capture_scale: if scale.is_finite() && scale > 0.0 {
+                scale
+            } else {
+                1.0
+            },
             ocr_backend: backend_label.clone(),
         };
 
@@ -392,7 +605,11 @@ pub async fn run_pipeline(
         let _ = window.emit(
             "ocr-status",
             OcrStatusPayload {
-                state: if used_profile_fallback { "warning".to_string() } else { "ok".to_string() },
+                state: if used_profile_fallback {
+                    "warning".to_string()
+                } else {
+                    "ok".to_string()
+                },
                 language_pair: current_language,
                 message: if used_profile_fallback {
                     "Text detected, but OCR language fallback was used".to_string()
